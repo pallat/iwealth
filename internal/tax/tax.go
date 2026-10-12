@@ -39,7 +39,42 @@ func LoadRules(path string) (*Rules, error) {
 	if len(r.Brackets) == 0 {
 		return nil, fmt.Errorf("%s: no brackets", path)
 	}
+	if err := r.validate(); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
 	return &r, nil
+}
+
+func deductibleType(t config.FundType) bool {
+	return t == config.RMF || t == config.SSF || t == config.ThaiESG
+}
+
+func (r *Rules) validate() error {
+	var prev float64
+	for i, b := range r.Brackets {
+		if b.Rate < 0 || b.Rate > 1 {
+			return fmt.Errorf("bracket %d: rate %v must be between 0 and 1", i+1, b.Rate)
+		}
+		last := i == len(r.Brackets)-1
+		switch {
+		case last && b.UpTo != 0:
+			return fmt.Errorf("last bracket must be open-ended (up_to: 0), got up_to %v", b.UpTo)
+		case !last && b.UpTo <= prev:
+			return fmt.Errorf("bracket %d: up_to values must be strictly ascending and only the last may be 0", i+1)
+		}
+		prev = b.UpTo
+	}
+	for t := range r.Caps {
+		if !deductibleType(t) {
+			return fmt.Errorf("caps: unknown fund type %q (use rmf, ssf or thaiesg, lower-case)", t)
+		}
+	}
+	for _, t := range r.Combined.Types {
+		if !deductibleType(t) {
+			return fmt.Errorf("combined.types: unknown fund type %q (use rmf, ssf or thaiesg, lower-case)", t)
+		}
+	}
+	return nil
 }
 
 // Tax computes progressive tax on net taxable income.

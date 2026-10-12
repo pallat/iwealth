@@ -10,7 +10,7 @@ brackets:        # up_to: 0 means no upper limit
   - {up_to: 0, rate: 0.35}
 caps:
   rmf: 500000
-  ssf: 200000
+  ssf: 200000   # SSF deduction rules changed: purchases are deductible only for certain years; verify with the Revenue Department before relying on this cap (set to 0 if not applicable)
   thaiesg: 300000
 combined:
   cap: 500000
