@@ -386,7 +386,7 @@ func TestHandleCommand(t *testing.T) {
 		}
 	}
 	tr := e.j.HandleCommand(ctx, "/tax")
-	for _, w := range []string{"RMF", money(20000), money(500000), money(e.j.Rules.RemainingRoom(config.RMF, map[config.FundType]float64{config.RMF: 20000}, 0))} {
+	for _, w := range []string{"ปีภาษี 2026", "RMF/SSF ซื้อเพิ่มได้ " + money(480000) + " บาท", "Thai ESG ซื้อเพิ่มได้ " + money(300000) + " บาท"} {
 		if !strings.Contains(tr, w) {
 			t.Errorf("/tax missing %q: %s", w, tr)
 		}
@@ -433,7 +433,7 @@ func TestTaxSavingsConsistentAcrossTypes(t *testing.T) {
 		t.Errorf("paid reply missing marginal ssf saving %s: %s", want, r)
 	}
 	total := money(r1.Tax(income) - r1.Tax(income-400000))
-	if tr := e.j.HandleCommand(ctx, "/tax"); !strings.Contains(tr, "รวมประหยัดภาษีโดยประมาณ "+total) {
+	if tr := e.j.HandleCommand(ctx, "/tax"); !strings.Contains(tr, "ลดหย่อนไปแล้ว "+total+" บาท") {
 		t.Errorf("/tax total want %s: %s", total, tr)
 	}
 }
@@ -736,8 +736,11 @@ func TestDeductCommand(t *testing.T) {
 		t.Fatalf("set should replace: %v", m)
 	}
 	// room for RMF now reflects the manual entry
-	if r := e.j.HandleCommand(ctx, "/tax"); !strings.Contains(r, money(310000)) || !strings.Contains(r, "PVD") {
+	if r := e.j.HandleCommand(ctx, "/tax"); !strings.Contains(r, "RMF/SSF ซื้อเพิ่มได้ "+money(310000)) {
 		t.Errorf("/tax should show combined room: %s", r)
+	}
+	if r := e.j.HandleCommand(ctx, "/report"); !strings.Contains(r, "PVD [pvd] "+money(90000)+"/"+money(500000)) {
+		t.Errorf("/report should list pvd as paid/cap: %s", r)
 	}
 	// plan on dip alert uses the same room
 	paid, _ := e.j.allPaid(ctx, 2026)
@@ -972,9 +975,12 @@ func TestOverCapKeepsRecordedValueButCalculatesWithCap(t *testing.T) {
 	if got := e.j.Rules.RemainingRoom(config.RMF, paid, 0); got != 300000 {
 		t.Errorf("RMF room = %v want 300000", got)
 	}
-	tr := e.j.HandleCommand(ctx, "/tax")
-	if !strings.Contains(tr, "เกินสิทธิ์") || !strings.Contains(tr, money(300000)) {
-		t.Errorf("/tax should flag the excess and use the capped group: %s", tr)
+	if tr := e.j.HandleCommand(ctx, "/tax"); !strings.Contains(tr, "RMF/SSF ซื้อเพิ่มได้ "+money(300000)) {
+		t.Errorf("/tax should use the capped group: %s", tr)
+	}
+	rr := e.j.HandleCommand(ctx, "/report")
+	if !strings.Contains(rr, "ประกันบำนาญ [pension_ins] 250,000/200,000 ⚠ เกินสิทธิ์ 50,000") {
+		t.Errorf("/report should flag the excess: %s", rr)
 	}
 }
 
@@ -984,7 +990,7 @@ func TestReportCommand(t *testing.T) {
 	e.now = day(10, 12).Add(10 * time.Hour)
 
 	empty := e.j.HandleCommand(ctx, "/report")
-	if !strings.Contains(empty, "รายงานค่าลดหย่อนปี 2026") || strings.Count(empty, "ยังไม่มีรายการ") != 2 {
+	if !strings.Contains(empty, "รายงานภาษีปี 2026") || !strings.Contains(empty, "ลดไปแล้ว 0 บาท") || strings.Contains(empty, "ใช้ไม่เต็มสิทธิ์") {
 		t.Errorf("empty report: %s", empty)
 	}
 
@@ -993,18 +999,19 @@ func TestReportCommand(t *testing.T) {
 	e.j.HandleCommand(ctx, "/deduct pvd 60000")
 	e.st.AddPaid(ctx, "ABC-RMF", config.RMF, 9999, time.Date(2025, 6, 1, 0, 0, 0, 0, bangkok))
 
+	// purchases are summed per item, not listed one by one
 	r := e.j.HandleCommand(ctx, "/report")
-	for _, w := range []string{"1. 2026-10-12 ABC-RMF 10,000", "2. 2026-10-12 ABC-RMF 5,000.50", "pvd", "60,000", "สรุปภาษีปี 2026"} {
+	for _, w := range []string{"ใช้ไม่เต็มสิทธิ์ (จ่ายแล้ว/เพดาน)", "RMF 15,000/500,000", "PVD [pvd] 60,000/500,000"} {
 		if !strings.Contains(r, w) {
 			t.Errorf("report missing %q:\n%s", w, r)
 		}
 	}
-	if strings.Contains(r, "9,999") {
-		t.Errorf("other year leaked:\n%s", r)
+	if strings.Contains(r, "9,999") || strings.Contains(r, "2026-10-12") || strings.Contains(r, "ใช้เต็มเพดานแล้ว") {
+		t.Errorf("unexpected content:\n%s", r)
 	}
 	// other year, Gregorian and Buddhist
 	for _, in := range []string{"/report 2025", "/report 2568"} {
-		if r := e.j.HandleCommand(ctx, in); !strings.Contains(r, "2025-06-01 ABC-RMF 9,999") || strings.Contains(r, "10,000") {
+		if r := e.j.HandleCommand(ctx, in); !strings.Contains(r, "รายงานภาษีปี 2025") || !strings.Contains(r, "RMF 9,999/500,000") || strings.Contains(r, "15,000") {
 			t.Errorf("%s:\n%s", in, r)
 		}
 	}
@@ -1013,8 +1020,8 @@ func TestReportCommand(t *testing.T) {
 			t.Errorf("%q should be rejected: %s", in, r)
 		}
 	}
-	if h := e.j.HandleCommand(ctx, "hello"); !strings.Contains(h, "/report") {
-		t.Errorf("help lacks /report: %s", h)
+	if h := e.j.HandleCommand(ctx, "hello"); !strings.Contains(h, "/report") || !strings.Contains(h, "/withheld") {
+		t.Errorf("help lacks /report or /withheld: %s", h)
 	}
 }
 
@@ -1027,43 +1034,78 @@ func TestTaxSummaryFromGrossIncome(t *testing.T) {
 	e.j.Cfg.AnnualGrossIncome, e.j.Cfg.AnnualNetIncome, e.j.Cfg.ExpenseKind = 1200000, 0, "salary"
 
 	e.j.HandleCommand(ctx, "/paid ABC-RMF 100000")
-	e.j.HandleCommand(ctx, "/deduct social_security 9000")
+	e.j.HandleCommand(ctx, "/deduct social_security 10500")
 	e.j.HandleCommand(ctx, "/deduct life_ins 100000")
 	e.j.HandleCommand(ctx, "/deduct health_ins 25000") // life+health group caps at 100k
 
+	// expense 100k; deductions: personal 60k + rmf 100k + social 10.5k + life/health 100k = 270.5k
+	// net = 1,200,000 - 100,000 - 269,000 = 829,500 -> 20% bracket (750,001 - 1,000,000)
+	// tax before deductions = Tax(1,100,000) = 140,000; tax due = Tax(829,500) = 80,900; saved 59,100
 	r := e.j.HandleCommand(ctx, "/tax")
-	// expense 100k; deductions: personal 60k + rmf 100k + social 9k + life/health 100k = 269k
-	// net = 1,200,000 - 100,000 - 269,000 = 831,000 -> 20% bracket (750,001 - 1,000,000)
 	for _, w := range []string{
-		"รายได้รวม 1,200,000", "หักค่าใช้จ่าย 100,000", "ลดหย่อนที่นับได้ 269,000",
-		"เงินได้สุทธิ 831,000", "ขั้นภาษี 20%", "750,001 – 1,000,000",
-		"เงินได้สุทธิเกิน 1,000,000 จะขึ้นขั้น 25%", "ลดหย่อนเพิ่ม 81,000 จะลงเป็นขั้น 15%",
-		"ลดหย่อนส่วนตัว: 60,000 (หักอัตโนมัติ)", "RMF: ใช้แล้ว 100,000",
-		"ใช้สิทธิ์ได้อีก (ซื้อเพิ่มได้)", "RMF: ได้อีก 260,000", "THAIESG: ได้อีก", "ประกันชีวิตบำนาญ [pension_ins]: ได้อีก",
-		"/room", "/guide",
+		"ปีภาษี 2026 | ขั้นภาษี 20%", "ลดหย่อนไปแล้ว 59,100 บาท", "ต้องจ่ายภาษี 80,900 บาท", "/withheld",
+		"RMF/SSF ซื้อเพิ่มได้ 400,000 บาท", "Thai ESG ซื้อเพิ่มได้ 300,000 บาท",
 	} {
 		if !strings.Contains(r, w) {
 			t.Errorf("/tax missing %q:\n%s", w, r)
 		}
 	}
-	// /tax advertises only RMF/Thai ESG and insurance; everything else is behind /room
-	for _, no := range []string{"(ถ้าเข้าเกณฑ์)", "คู่สมรส [spouse]: ได้อีก", "SSF: ได้อีก", "กอช.", "ดอกเบี้ยบ้าน [home_loan]: ได้อีก"} {
+	// short: no income, no per-item list
+	for _, no := range []string{"1,200,000", "831,000", "รายได้", "ประกันสังคม", "คู่สมรส", "ANNUAL_GROSS_INCOME"} {
 		if strings.Contains(r, no) {
-			t.Errorf("/tax must not advertise %q:\n%s", no, r)
+			t.Errorf("/tax must not show %q:\n%s", no, r)
 		}
 	}
+	// withheld tax is subtracted: under-withheld pays more, over-withheld gets a refund
+	if got := e.j.HandleCommand(ctx, "/withheld 50000"); !strings.Contains(got, "50,000") || !strings.Contains(got, "ต้องจ่ายเพิ่ม 30,900 บาท") {
+		t.Errorf("/withheld reply: %s", got)
+	}
+	if tr := e.j.HandleCommand(ctx, "/tax"); !strings.Contains(tr, "หัก ณ ที่จ่ายแล้ว 50,000 บาท | ต้องจ่ายเพิ่ม 30,900 บาท") {
+		t.Errorf("/tax with withheld:\n%s", tr)
+	}
+	if got := e.j.HandleCommand(ctx, "/withheld 90000"); !strings.Contains(got, "จ่ายเกิน ขอคืนได้ 9,100 บาท") {
+		t.Errorf("/withheld refund: %s", got)
+	}
+	if rep := e.j.HandleCommand(ctx, "/report"); !strings.Contains(rep, "ขั้นภาษี 20% | ภาษีรวม 140,000 บาท | ลดไปแล้ว 59,100 บาท\nหัก ณ ที่จ่ายแล้ว 90,000 บาท | จ่ายเกิน ขอคืนได้ 9,100 บาท") {
+		t.Errorf("/report headline:\n%s", rep)
+	}
+	if got := e.j.HandleCommand(ctx, "/withheld"); !strings.Contains(got, "90,000") {
+		t.Errorf("/withheld show: %s", got)
+	}
+	e.j.HandleCommand(ctx, "/withheld 0")
+	if w, _ := e.st.Withheld(ctx, 2026); w != 0 {
+		t.Errorf("0 should clear: %v", w)
+	}
+	for _, in := range []string{"/withheld abc", "/withheld -5", "/withheld 1 2"} {
+		if got := e.j.HandleCommand(ctx, in); !strings.Contains(got, "ไม่ถูกต้อง") {
+			t.Errorf("%q should be rejected: %s", in, got)
+		}
+	}
+
+	rep := e.j.HandleCommand(ctx, "/report")
+	for _, w := range []string{
+		"รายงานภาษีปี 2026", "ขั้นภาษี 20% | ภาษีรวม 140,000 บาท | ลดไปแล้ว 59,100 บาท\nต้องจ่ายเพิ่ม 80,900 บาท",
+		"ใช้ไม่เต็มสิทธิ์ (จ่ายแล้ว/เพดาน)", "RMF 100,000/360,000", "⚠ เกินสิทธิ์ 25,000",
+		"ใช้เต็มเพดานแล้ว", "ลดหย่อนส่วนตัว 60,000", "ประกันสังคม [social_security] 10,500",
+	} {
+		if !strings.Contains(rep, w) {
+			t.Errorf("/report missing %q:\n%s", w, rep)
+		}
+	}
+	if strings.Contains(rep, "คู่สมรส") || strings.Contains(rep, "ดอกเบี้ยบ้าน") {
+		t.Errorf("/report must not list unused items:\n%s", rep)
+	}
+	// /room: only what has not been used at all
 	room := e.j.HandleCommand(ctx, "/room")
-	for _, w := range []string{"(ถ้าเข้าเกณฑ์)", "คู่สมรส [spouse]: ได้อีก 60,000", "SSF: ได้อีก 200,000", "กอช. [nsf]", "ดอกเบี้ยบ้าน [home_loan]", "RMF: ได้อีก 260,000", "/guide"} {
+	for _, w := range []string{"สิทธิ์ที่ยังไม่ได้ใช้เลย", "(ถ้าเข้าเกณฑ์)", "คู่สมรส [spouse]: ได้อีก 60,000", "เงินบริจาค [donation]: ไม่กำหนดเพดาน", "SSF: ได้อีก 200,000", "THAIESG: ได้อีก", "กอช. [nsf]", "ดอกเบี้ยบ้าน [home_loan]", "/guide"} {
 		if !strings.Contains(room, w) {
 			t.Errorf("/room missing %q:\n%s", w, room)
 		}
 	}
-	// life+health group is full (125k recorded, 100k counted) -> not offered again
-	if strings.Contains(r, "ประกันชีวิต: ได้อีก") || strings.Contains(r, "ประกันสุขภาพ: ได้อีก") {
-		t.Errorf("full group must not be offered:\n%s", r)
-	}
-	if strings.Contains(r, "ANNUAL_GROSS_INCOME") {
-		t.Errorf("no legacy hint when gross is set:\n%s", r)
+	for _, no := range []string{"RMF: ได้อีก", "ประกันสังคม", "ประกันชีวิต: ได้อีก", "ประกันสุขภาพ: ได้อีก"} {
+		if strings.Contains(room, no) {
+			t.Errorf("/room must not list used item %q:\n%s", no, room)
+		}
 	}
 	// personal allowance is automatic
 	if got := e.j.HandleCommand(ctx, "/deduct personal 60000"); !strings.Contains(got, "อัตโนมัติ") {
@@ -1078,7 +1120,7 @@ func TestTaxSummaryFromGrossIncome(t *testing.T) {
 	if !ok || p.Room != 260000 { // 30% of gross 360k - 100k bought
 		t.Fatalf("plan %+v %v", p, ok)
 	}
-	if want := e.j.Rules.TaxSaved(831000, 260000); p.TaxSaved != want {
+	if want := e.j.Rules.TaxSaved(829500, 260000); p.TaxSaved != want {
 		t.Errorf("plan saving %v want %v", p.TaxSaved, want)
 	}
 }

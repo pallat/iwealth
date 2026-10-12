@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -18,6 +19,7 @@ CREATE TABLE IF NOT EXISTS nav (fund TEXT NOT NULL, date TEXT NOT NULL, nav REAL
 CREATE TABLE IF NOT EXISTS alert_state (fund TEXT PRIMARY KEY, level REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS tax_paid (id INTEGER PRIMARY KEY AUTOINCREMENT, fund TEXT NOT NULL, type TEXT NOT NULL, amount REAL NOT NULL, paid_on TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS deduction_entry (year INTEGER NOT NULL, key TEXT NOT NULL, amount REAL NOT NULL, PRIMARY KEY (year, key));
+CREATE TABLE IF NOT EXISTS tax_withheld (year INTEGER PRIMARY KEY, amount REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS year_end_reminder (day TEXT PRIMARY KEY);
 `
 
@@ -142,6 +144,28 @@ func (s *Store) Deductions(ctx context.Context, year int) (map[config.FundType]f
 		out[config.FundType(k)] = a
 	}
 	return out, rows.Err()
+}
+
+// SetWithheld records the year-to-date income tax already withheld at source,
+// replacing any earlier value. amount 0 removes the entry.
+func (s *Store) SetWithheld(ctx context.Context, year int, amount float64) error {
+	if amount == 0 {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM tax_withheld WHERE year=?`, year)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO tax_withheld(year,amount) VALUES(?,?)
+		ON CONFLICT(year) DO UPDATE SET amount=excluded.amount`, year, amount)
+	return err
+}
+
+// Withheld returns the tax withheld at source for a year (0 when not recorded).
+func (s *Store) Withheld(ctx context.Context, year int) (float64, error) {
+	var a float64
+	err := s.db.QueryRowContext(ctx, `SELECT amount FROM tax_withheld WHERE year=?`, year).Scan(&a)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return a, err
 }
 
 func (s *Store) ReminderSent(ctx context.Context, day time.Time) (bool, error) {

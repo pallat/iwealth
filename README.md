@@ -52,10 +52,11 @@ Every deduction is an entry in `tax_rules.yaml`: a baht cap under `caps:`, an op
 
 - `/paid <fund> <amount>`: record a purchase of a tax-deductible fund. Example: `/paid EXAMPLE-RMF 10000`.
 - `/deduct <key> <year-to-date total>`: record any deduction other than RMF, SSF and Thai ESG (keys are the `manual:` entries, for example `pvd`, `pension_ins`, `life_ins`, `health_ins`, `spouse`, `child`, `social_security`, `home_loan`, `donation`). For `child`, `disabled` and `donation` enter the total amount you can claim, since there is no fixed cap. The amount **replaces** the previous value, so send the running total for the year; `0` removes it. Example: `/deduct pvd 60000`. If you record more than an item can deduct (its baht cap or `pct:` limit, or past the shared cap), the amount stays recorded as entered, but room and tax estimates count only what is deductible and `/tax` and `/deduct` flag the excess. Plain `/deduct` lists the keys. RMF, SSF and Thai ESG use `/paid`.
-- `/report [year]`: list every recorded `/paid` purchase (date, fund, amount) and `/deduct` total for the year, followed by the `/tax` summary. `/report 2025` or a Buddhist year such as `/report 2568` picks another year.
+- `/report [year]`: the tax figures (bracket, total tax, tax saved so far, tax still to pay), then every deduction you have used as `paid/cap` (flagged with ⚠ when it is over its limit), then the ones already at their cap. Unused deductions are not listed. `/report 2025` or a Buddhist year such as `/report 2568` picks another year.
+- `/withheld <year-to-date total>`: record the income tax already withheld at source (for example from payslips). It replaces the previous value; `0` removes it; plain `/withheld` shows it. `/tax` and `/report` subtract it from the tax due and say whether you still owe or can claim a refund.
 - `/guide [term]`: how to record each deduction: its key, cap, and an example command. `/guide ประกัน` or `/guide pvd` filters by word or key. Reports print the key in brackets next to each name, for example `ประกันชีวิตบำนาญ [pension_ins]`.
-- `/room`: every deduction that still has room, including the ones `/tax` leaves out.
-- `/tax`: where you are in the tax brackets (net taxable income, current rate, tax due, what would move you up or down a bracket), what you have used per item, and the remaining room for the items listed under `summary:` in `tax_rules.yaml` (RMF, Thai ESG and insurance by default). Everything else is in `/room`.
+- `/room`: only the deductions you have not used at all yet.
+- `/tax`: the short version. Tax year, current bracket, tax saved so far, tax to pay (or refund, once `/withheld` is set), and how much more you can put in RMF/SSF and Thai ESG. It does not show your income.
 
 ## Privacy
 

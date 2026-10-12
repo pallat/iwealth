@@ -297,3 +297,24 @@ func ParseDeduct(text string) (key string, amount float64, err error) {
 	}
 	return strings.ToLower(f[1]), amount, nil
 }
+
+// ParseWithheld parses "/withheld <amount>" (also "/withheld@BotName ..."). The
+// amount is the year-to-date tax withheld at source; 0 clears it.
+func ParseWithheld(text string) (amount float64, err error) {
+	f := strings.Fields(text)
+	cmd := ""
+	if len(f) > 0 {
+		cmd = f[0]
+		if i := strings.IndexByte(cmd, '@'); i >= 0 {
+			cmd = cmd[:i]
+		}
+	}
+	if len(f) != 2 || cmd != "/withheld" {
+		return 0, errors.New("usage: /withheld <amount>")
+	}
+	amount, err = strconv.ParseFloat(f[1], 64)
+	if err != nil || math.IsNaN(amount) || math.IsInf(amount, 0) || amount < 0 {
+		return 0, errors.New("amount must be a number, 0 or greater")
+	}
+	return amount, nil
+}

@@ -39,6 +39,8 @@ type Store interface {
 	SetDeduction(ctx context.Context, year int, key config.FundType, amount float64) error
 	Deductions(ctx context.Context, year int) (map[config.FundType]float64, error)
 	PaidRows(ctx context.Context, year int) ([]store.PaidRow, error)
+	SetWithheld(ctx context.Context, year int, amount float64) error
+	Withheld(ctx context.Context, year int) (float64, error)
 	ReminderSent(ctx context.Context, day time.Time) (bool, error)
 	MarkReminderSent(ctx context.Context, day time.Time) error
 }
@@ -645,7 +647,7 @@ func (j *Job) yearEndMessage(ctx context.Context, d time.Time) string {
 
 // ---- commands ----
 
-const help = "คำสั่งที่ใช้ได้:\n/paid <กอง> <จำนวนเงิน> บันทึกยอดซื้อกองลดหย่อนภาษี\n/deduct <รายการ> <ยอดสะสมทั้งปี> บันทึกค่าลดหย่อนอื่น เช่น PVD, ประกันบำนาญ (0 = ลบ, /deduct เฉยๆ ดูรายการ)\n/tax สรุปภาษีและสิทธิ์ลดหย่อนปีนี้\n/room สิทธิ์ลดหย่อนที่ใช้ได้อีกทั้งหมด\n/guide [คำค้น] วิธีบันทึกค่าลดหย่อนแต่ละรายการ เช่น /guide ประกัน\n/report [ปี] รายงานรายการที่บันทึกไว้ทั้งหมด"
+const help = "คำสั่งที่ใช้ได้:\n/paid <กอง> <จำนวนเงิน> บันทึกยอดซื้อกองลดหย่อนภาษี\n/deduct <รายการ> <ยอดสะสมทั้งปี> บันทึกค่าลดหย่อนอื่น เช่น PVD, ประกันบำนาญ (0 = ลบ, /deduct เฉยๆ ดูรายการ)\n/withheld <ยอดสะสม> บันทึกภาษีที่ถูกหัก ณ ที่จ่ายปีนี้ (0 = ลบ)\n/tax สรุปภาษีปีนี้แบบสั้น\n/room สิทธิ์ลดหย่อนที่ยังไม่ได้ใช้เลย\n/guide [คำค้น] วิธีบันทึกค่าลดหย่อนแต่ละรายการ เช่น /guide ประกัน\n/report [ปี] รายงานภาษีและสิทธิ์ที่ใช้แล้ว"
 
 func commandName(text string) string {
 	f := strings.Fields(text)
@@ -666,6 +668,8 @@ func (j *Job) HandleCommand(ctx context.Context, text string) string {
 		return j.paid(ctx, text)
 	case "/deduct":
 		return j.deduct(ctx, text)
+	case "/withheld":
+		return j.withheld(ctx, text)
 	case "/room":
 		return j.room(ctx)
 	case "/guide":
@@ -772,8 +776,9 @@ func (j *Job) overNote(paid map[config.FundType]float64, t config.FundType) stri
 	return fmt.Sprintf("\n  ⚠ เกินสิทธิ์ นับลดหย่อนได้ %s (ส่วนเกิน %s ไม่นับ)", money(ded), money(paid[t]-ded))
 }
 
-// report lists every recorded purchase and manual deduction for a year, then the
-// same summary as /tax. "/report 2025" (or a Buddhist year, 2568) picks another year.
+// report serves /report [year]: the tax figures for a year, then every deduction
+// in use (paid/cap, flagged when over its limit), then those already at their cap.
+// "/report 2025" (or a Buddhist year, 2568) picks another year.
 func (j *Job) report(ctx context.Context, text string) string {
 	year := bkkDate(j.now()).Year()
 	if f := strings.Fields(text); len(f) > 2 {
@@ -788,36 +793,120 @@ func (j *Job) report(ctx context.Context, text string) string {
 		}
 		year = y
 	}
-	rows, err := j.Store.PaidRows(ctx, year)
+	paid, err := j.allPaid(ctx, year)
 	if err != nil {
 		return "อ่านข้อมูลไม่สำเร็จ ลองใหม่อีกครั้ง"
 	}
-	manual, err := j.Store.Deductions(ctx, year)
+	f, err := j.figures(ctx, year, paid)
 	if err != nil {
 		return "อ่านข้อมูลไม่สำเร็จ ลองใหม่อีกครั้ง"
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "รายงานค่าลดหย่อนปี %d\n\nซื้อกองทุน (/paid)\n", year)
-	if len(rows) == 0 {
-		b.WriteString("  ยังไม่มีรายการ\n")
-	}
-	for i, r := range rows {
-		fmt.Fprintf(&b, "  %d. %s %s %s บาท\n", i+1, r.On.Format("2006-01-02"), r.Fund, amountStr(r.Amount))
-	}
-	b.WriteString("\nค่าลดหย่อนอื่น (/deduct, ยอดสะสม)\n")
-	n := 0
-	for _, m := range j.Rules.Manual {
-		if v := manual[m.Key]; v > 0 {
-			fmt.Fprintf(&b, "  %s (%s): %s บาท\n", m.Key, m.Label, amountStr(v))
-			n++
+	gross := j.Cfg.AnnualGrossIncome
+	ded := j.Rules.Deductible(paid, gross)
+	var partial, full []string
+	for _, t := range j.Rules.Deductions() {
+		switch {
+		case j.Rules.IsAuto(t):
+			if ded[t] > 0 {
+				full = append(full, fmt.Sprintf("%s %s", j.Rules.Label(t), money(ded[t])))
+			}
+		case paid[t] <= 0:
+		case j.Rules.Caps[t] == 0:
+			partial = append(partial, fmt.Sprintf("%s %s (ไม่กำหนดเพดาน)", j.itemName(t), money(paid[t])))
+		case paid[t]-ded[t] >= 0.005:
+			partial = append(partial, fmt.Sprintf("%s %s/%s ⚠ เกินสิทธิ์ %s (นับได้ %s)", j.itemName(t),
+				money(paid[t]), money(j.Rules.ItemCap(t, gross)), money(paid[t]-ded[t]), money(ded[t])))
+		case j.Rules.RemainingRoom(t, paid, gross) <= 0:
+			full = append(full, fmt.Sprintf("%s %s", j.itemName(t), money(paid[t])))
+		default:
+			partial = append(partial, fmt.Sprintf("%s %s/%s", j.itemName(t), money(paid[t]), money(j.Rules.ItemCap(t, gross))))
 		}
 	}
-	if n == 0 {
-		b.WriteString("  ยังไม่มีรายการ\n")
+	var b strings.Builder
+	fmt.Fprintf(&b, "รายงานภาษีปี %d\nขั้นภาษี %s | ภาษีรวม %s บาท | ลดไปแล้ว %s บาท\n%s\n",
+		year, rate(f.Rate), money(f.Before), money(f.Saved), settleLine(f.Due, f.Withheld))
+	if len(partial) > 0 {
+		b.WriteString("\nใช้ไม่เต็มสิทธิ์ (จ่ายแล้ว/เพดาน)\n" + strings.Join(partial, "\n") + "\n")
 	}
-	b.WriteString("\n")
-	b.WriteString(j.summaryFor(ctx, year))
-	return b.String()
+	if len(full) > 0 {
+		b.WriteString("\nใช้เต็มเพดานแล้ว\n" + strings.Join(full, "\n") + "\n")
+	}
+	if gross <= 0 {
+		b.WriteString("\nหมายเหตุ: ยังไม่ได้ตั้ง ANNUAL_GROSS_INCOME จึงไม่คิดค่าใช้จ่ายและเพดาน % ของรายได้")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// taxFigures are the headline numbers for one tax year.
+type taxFigures struct {
+	Rate     float64 // marginal rate of the current bracket
+	Before   float64 // tax with no deduction but the expense deduction
+	Saved    float64 // tax saved by the counted deductions
+	Due      float64 // tax payable after deductions
+	Withheld float64 // tax already withheld at source (/withheld)
+}
+
+func (j *Job) figures(ctx context.Context, year int, paid map[config.FundType]float64) (taxFigures, error) {
+	withheld, err := j.Store.Withheld(ctx, year)
+	if err != nil {
+		return taxFigures{}, err
+	}
+	inc := j.income()
+	net := j.Rules.NetTaxable(inc, paid)
+	_, saved := plan.SavedSoFar(j.Rules, inc, paid)
+	return taxFigures{
+		Rate: j.Rules.BracketAt(net).Rate, Before: j.Rules.Tax(max(j.Rules.Base(inc), 0)),
+		Saved: saved, Due: j.Rules.Tax(net), Withheld: withheld,
+	}, nil
+}
+
+// settleLine says what is left to pay (or get back) once the tax withheld at source is counted.
+func settleLine(due, withheld float64) string {
+	if withheld <= 0 {
+		return fmt.Sprintf("ต้องจ่ายเพิ่ม %s บาท", money(due))
+	}
+	head := fmt.Sprintf("หัก ณ ที่จ่ายแล้ว %s บาท | ", money(withheld))
+	switch d := due - withheld; {
+	case d > 0.5:
+		return head + fmt.Sprintf("ต้องจ่ายเพิ่ม %s บาท", money(d))
+	case d < -0.5:
+		return head + fmt.Sprintf("จ่ายเกิน ขอคืนได้ %s บาท", money(-d))
+	}
+	return head + "ไม่ต้องจ่ายเพิ่ม"
+}
+
+// withheld serves /withheld [year-to-date total]: tax already withheld at source,
+// which /tax and /report subtract from the tax due. The amount replaces the old value.
+func (j *Job) withheld(ctx context.Context, text string) string {
+	year := bkkDate(j.now()).Year()
+	if len(strings.Fields(text)) == 1 {
+		w, err := j.Store.Withheld(ctx, year)
+		if err != nil {
+			return "อ่านข้อมูลไม่สำเร็จ ลองใหม่อีกครั้ง"
+		}
+		return fmt.Sprintf("ภาษีหัก ณ ที่จ่ายที่บันทึกปี %d: %s บาท\nใช้: /withheld <ยอดสะสมทั้งปี> เช่น /withheld 50000 (0 = ลบ)", year, money(w))
+	}
+	amount, err := telegram.ParseWithheld(text)
+	if err != nil {
+		return "รูปแบบไม่ถูกต้อง ใช้: /withheld <ยอดสะสมทั้งปี> เช่น /withheld 50000 (0 = ลบ)"
+	}
+	if err := j.Store.SetWithheld(ctx, year, amount); err != nil {
+		return "บันทึกไม่สำเร็จ ลองใหม่อีกครั้ง"
+	}
+	verb := "ตั้งภาษีหัก ณ ที่จ่ายปี"
+	if amount == 0 {
+		verb = "ลบภาษีหัก ณ ที่จ่ายปี"
+	}
+	head := fmt.Sprintf("%s %d: %s บาท แล้ว (ค่าเดิมถูกแทนที่)", verb, year, amountStr(amount))
+	paid, err := j.allPaid(ctx, year)
+	if err != nil {
+		return head
+	}
+	f, err := j.figures(ctx, year, paid)
+	if err != nil {
+		return head
+	}
+	return head + "\n" + settleLine(f.Due, f.Withheld)
 }
 
 func (j *Job) deductList(ctx context.Context, year int) string {
@@ -897,16 +986,30 @@ func (j *Job) opportunities(inc tax.Income, paid map[config.FundType]float64, ke
 	return b.String()
 }
 
-// room serves /room: every deduction that still has room, including the ones /tax leaves out.
+// room serves /room: only the deductions you have not used at all yet.
 func (j *Job) room(ctx context.Context) string {
 	year := bkkDate(j.now()).Year()
 	paid, err := j.allPaid(ctx, year)
 	if err != nil {
 		return "อ่านข้อมูลไม่สำเร็จ ลองใหม่อีกครั้ง"
 	}
-	out := j.opportunities(j.income(), paid, func(config.FundType) bool { return true }, "สิทธิ์ลดหย่อนที่ใช้ได้อีกปี "+strconv.Itoa(year))
+	unused := func(t config.FundType) bool { return paid[t] <= 0 }
+	out := j.opportunities(j.income(), paid, unused, "สิทธิ์ที่ยังไม่ได้ใช้เลย ปี "+strconv.Itoa(year))
+	// items with no cap (donation, child, ...) have no "room", so list them separately
+	var open []string
+	for _, m := range j.Rules.Manual {
+		if !m.Auto && j.Rules.Caps[m.Key] == 0 && unused(m.Key) {
+			open = append(open, fmt.Sprintf("%s: ไม่กำหนดเพดาน", j.itemName(m.Key)))
+		}
+	}
+	if len(open) > 0 {
+		if out != "" {
+			out += "\n"
+		}
+		out += "ไม่กำหนดเพดาน (ถ้าเข้าเกณฑ์)\n" + strings.Join(open, "\n") + "\n"
+	}
 	if out == "" {
-		return "ไม่มีสิทธิ์ลดหย่อนเหลือ (หรือยังไม่ได้ตั้งรายได้)"
+		return "ไม่มีสิทธิ์ที่ยังไม่ได้ใช้เลย (หรือยังไม่ได้ตั้งรายได้) ดูที่ใช้ไปแล้ว: /report"
 	}
 	return out + "วิธีบันทึก: /guide"
 }
@@ -1011,58 +1114,33 @@ func (j *Job) positionLines(inc tax.Income, paid map[config.FundType]float64) st
 	return b.String()
 }
 
+// summaryFor serves /tax: only the headline figures and the room left in the
+// funds you can still buy. Everything else is in /report and /room.
 func (j *Job) summaryFor(ctx context.Context, year int) string {
 	paid, err := j.allPaid(ctx, year)
 	if err != nil {
 		return "อ่านข้อมูลไม่สำเร็จ ลองใหม่อีกครั้ง"
 	}
-	inc := j.income()
-	gross := inc.Gross
-	ded := j.Rules.Deductible(paid, gross)
-	byType, total := plan.SavedSoFar(j.Rules, inc, paid)
-
-	tracked := map[config.FundType]bool{}
-	for _, f := range j.Cfg.Funds {
-		if isTax(f.Type) {
-			tracked[f.Type] = true
-		}
+	f, err := j.figures(ctx, year, paid)
+	if err != nil {
+		return "อ่านข้อมูลไม่สำเร็จ ลองใหม่อีกครั้ง"
 	}
+	gross := j.Cfg.AnnualGrossIncome
 	var b strings.Builder
-	fmt.Fprintf(&b, "สรุปภาษีปี %d\n", year)
-	b.WriteString(j.positionLines(inc, paid))
-
-	b.WriteString("\nใช้สิทธิ์ลดหย่อนแล้ว\n")
-	shown := 0
-	for _, t := range j.Rules.Deductions() {
-		if !tracked[t] && paid[t] == 0 && ded[t] == 0 {
-			continue
-		}
-		shown++
-		switch {
-		case j.Rules.IsAuto(t):
-			fmt.Fprintf(&b, "%s: %s (หักอัตโนมัติ) | ประหยัดภาษีโดยประมาณ %s บาท\n", j.Rules.Label(t), money(ded[t]), money(byType[t]))
-		case j.Rules.Caps[t] == 0:
-			fmt.Fprintf(&b, "%s: ใช้แล้ว %s (ไม่กำหนดเพดาน) | ประหยัดภาษีโดยประมาณ %s บาท\n", j.itemName(t), money(paid[t]), money(byType[t]))
-		default:
-			fmt.Fprintf(&b, "%s: ใช้แล้ว %s / เพดาน %s | คงเหลือ %s | ประหยัดภาษีโดยประมาณ %s บาท%s\n",
-				j.itemName(t), money(paid[t]), money(j.Rules.ItemCap(t, gross)),
-				money(j.Rules.RemainingRoom(t, paid, gross)), money(byType[t]), j.overNote(paid, t))
-		}
+	fmt.Fprintf(&b, "ปีภาษี %d | ขั้นภาษี %s\nลดหย่อนไปแล้ว %s บาท\n", year, rate(f.Rate), money(f.Saved))
+	if f.Withheld > 0 {
+		b.WriteString(settleLine(f.Due, f.Withheld) + "\n")
+	} else {
+		fmt.Fprintf(&b, "ต้องจ่ายภาษี %s บาท (ยังไม่ได้บันทึกภาษีหัก ณ ที่จ่าย: /withheld)\n", money(f.Due))
 	}
-	if shown == 0 {
-		b.WriteString("ยังไม่มี\n")
+	room := j.Rules.RemainingRoom(config.RMF, paid, gross) + j.Rules.RemainingRoom(config.SSF, paid, gross)
+	if g := j.Rules.GroupOf(config.RMF); g != nil {
+		room = min(room, max(g.Cap-j.Rules.GroupUsed(*g, paid, gross), 0))
 	}
-	for _, g := range j.Rules.Groups {
-		fmt.Fprintf(&b, "%s\n", j.groupLine(g, paid))
-	}
-	fmt.Fprintf(&b, "รวมประหยัดภาษีโดยประมาณ %s บาท\n", money(total))
-
-	if opp := j.opportunities(inc, paid, j.Rules.InSummary, "ใช้สิทธิ์ได้อีก"); opp != "" {
-		b.WriteString("\n" + opp)
-		b.WriteString("สิทธิ์อื่นที่ใช้ได้อีก: พิมพ์ /room | วิธีบันทึก: /guide\n")
-	}
+	fmt.Fprintf(&b, "RMF/SSF ซื้อเพิ่มได้ %s บาท\nThai ESG ซื้อเพิ่มได้ %s บาท",
+		money(room), money(j.Rules.RemainingRoom(config.ThaiESG, paid, gross)))
 	if gross <= 0 {
-		b.WriteString("หมายเหตุ: ยังไม่ได้ตั้ง ANNUAL_GROSS_INCOME จึงไม่คิดค่าใช้จ่ายและเพดาน % ของรายได้\n")
+		b.WriteString("\nหมายเหตุ: ยังไม่ได้ตั้ง ANNUAL_GROSS_INCOME จึงไม่คิดค่าใช้จ่ายและเพดาน % ของรายได้")
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return b.String()
 }

@@ -33,7 +33,7 @@ caps:
   life_ins: 100000     # life/endowment insurance, 10+ years
   health_ins: 25000    # own health insurance
   parents_health: 15000
-  social_security: 9000
+  social_security: 10500
   home_loan: 100000    # home loan interest
   easy_ereceipt: 50000 # 2568 stimulus measure; edit or remove for other years
   travel: 30000        # 2568 stimulus measure (Oct-Dec 2025)
@@ -74,7 +74,7 @@ manual:
   - {key: life_ins, label: "ประกันชีวิต", kind: invest, hint: "เบี้ยประกันชีวิต/สะสมทรัพย์ (10 ปีขึ้นไป) ที่จ่ายจริง ไม่รวมบำนาญและสุขภาพ: /deduct life_ins 50000"}
   - {key: health_ins, label: "ประกันสุขภาพ", kind: invest, hint: "เบี้ยประกันสุขภาพตัวเอง สูงสุด 25000 (รวมกับประกันชีวิตไม่เกิน 100000): /deduct health_ins 20000"}
   - {key: parents_health, label: "ประกันสุขภาพบิดามารดา", kind: invest, hint: "เบี้ยประกันสุขภาพบิดามารดา สูงสุด 15000: /deduct parents_health 15000"}
-  - {key: social_security, label: "ประกันสังคม", hint: "ยอดที่จ่ายจริงทั้งปี สูงสุด 9000: /deduct social_security 9000"}
+  - {key: social_security, label: "ประกันสังคม", hint: "ยอดที่จ่ายจริงทั้งปี สูงสุด 10500: /deduct social_security 10500"}
   - {key: home_loan, label: "ดอกเบี้ยบ้าน", hint: "ดอกเบี้ยที่จ่ายจริงตามใบรับรองจากธนาคาร สูงสุด 100000: /deduct home_loan 80000"}
   - {key: donation, label: "เงินบริจาค", hint: "ใส่ยอดที่นับลดหย่อนได้จริงเอง (บริจาคการศึกษา/กีฬา/รพ.รัฐนับ 2 เท่า, รวมไม่เกิน 10% ของเงินได้สุทธิ): /deduct donation 10000"}
   - {key: easy_ereceipt, label: "Easy E-Receipt", hint: "ยอดซื้อที่มีใบกำกับภาษีอิเล็กทรอนิกส์ตามเงื่อนไขมาตรการปีนี้: /deduct easy_ereceipt 30000"}

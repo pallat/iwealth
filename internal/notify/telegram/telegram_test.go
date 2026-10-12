@@ -268,3 +268,16 @@ func TestWithTimeoutNamesTheTimeout(t *testing.T) {
 		t.Fatalf("err2 = %v", err2)
 	}
 }
+
+func TestParseWithheld(t *testing.T) {
+	for in, want := range map[string]float64{"/withheld 50000": 50000, "/withheld@Bot 1234.5": 1234.5, "/withheld 0": 0} {
+		if got, err := ParseWithheld(in); err != nil || got != want {
+			t.Errorf("%q: %v %v", in, got, err)
+		}
+	}
+	for _, in := range []string{"", "/withheld", "/withheld abc", "/withheld -1", "/withheld 1 2", "/withheld NaN", "/withheld Inf", "/paid 5"} {
+		if _, err := ParseWithheld(in); err == nil {
+			t.Errorf("%q should fail", in)
+		}
+	}
+}

@@ -76,3 +76,21 @@ func TestDeductionsSetReplaceClear(t *testing.T) {
 		t.Fatalf("not cleared: %v", m)
 	}
 }
+
+func TestWithheld(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	if v, err := s.Withheld(ctx, 2026); err != nil || v != 0 {
+		t.Fatalf("empty: %v %v", v, err)
+	}
+	s.SetWithheld(ctx, 2026, 1000)
+	s.SetWithheld(ctx, 2026, 2500)
+	s.SetWithheld(ctx, 2025, 9999)
+	if v, err := s.Withheld(ctx, 2026); err != nil || v != 2500 {
+		t.Fatalf("%v %v", v, err)
+	}
+	s.SetWithheld(ctx, 2026, 0)
+	if v, _ := s.Withheld(ctx, 2026); v != 0 {
+		t.Fatalf("not cleared: %v", v)
+	}
+}
