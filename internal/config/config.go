@@ -1,0 +1,135 @@
+package config
+
+import (
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type FundType string
+
+const (
+	RMF      FundType = "rmf"
+	SSF      FundType = "ssf"
+	ThaiESG  FundType = "thaiesg"
+	Ordinary FundType = "ordinary"
+)
+
+type Fund struct {
+	Code string
+	Type FundType
+}
+
+type Config struct {
+	SECAPIKey, DeepSeekKey, TelegramToken string
+	TelegramChatID                        int64
+	Funds                                 []Fund
+	PeakWindowDays                        int
+	DropTriggers                          []float64
+	AnnualNetIncome                       float64
+	RunAt, RetryUntil                     string
+	RetryInterval                         time.Duration
+	ContextProviders                      []string
+	Benchmarks, RSSURLs                   []string
+	SearchAPIURL, SearchAPIKey            string
+	DBPath, TaxRulesPath                  string
+}
+
+func Load(getenv func(string) string) (*Config, error) {
+	c := &Config{
+		SECAPIKey:     getenv("SEC_API_KEY"),
+		DeepSeekKey:   getenv("DEEPSEEK_API_KEY"),
+		TelegramToken: getenv("TELEGRAM_BOT_TOKEN"),
+		SearchAPIURL:  getenv("SEARCH_API_URL"),
+		SearchAPIKey:  getenv("SEARCH_API_KEY"),
+		RunAt:         or(getenv("RUN_AT"), "20:00"),
+		RetryUntil:    or(getenv("RETRY_UNTIL"), "23:30"),
+		DBPath:        or(getenv("DB_PATH"), "iwealth.db"),
+		TaxRulesPath:  or(getenv("TAX_RULES_PATH"), "tax_rules.yaml"),
+	}
+	for k, v := range map[string]string{"SEC_API_KEY": c.SECAPIKey, "DEEPSEEK_API_KEY": c.DeepSeekKey, "TELEGRAM_BOT_TOKEN": c.TelegramToken} {
+		if v == "" {
+			return nil, fmt.Errorf("%s is required", k)
+		}
+	}
+	var err error
+	if c.TelegramChatID, err = strconv.ParseInt(getenv("TELEGRAM_CHAT_ID"), 10, 64); err != nil {
+		return nil, fmt.Errorf("TELEGRAM_CHAT_ID: %w", err)
+	}
+	if c.Funds, err = parseFunds(getenv("FUNDS")); err != nil {
+		return nil, err
+	}
+	c.PeakWindowDays = 252
+	if v := getenv("PEAK_WINDOW_DAYS"); v != "" {
+		if c.PeakWindowDays, err = strconv.Atoi(v); err != nil || c.PeakWindowDays < 1 {
+			return nil, fmt.Errorf("PEAK_WINDOW_DAYS must be a positive integer")
+		}
+	}
+	if c.DropTriggers, err = parseFloats(or(getenv("DROP_TRIGGERS"), "5,10,15")); err != nil {
+		return nil, fmt.Errorf("DROP_TRIGGERS: %w", err)
+	}
+	sort.Float64s(c.DropTriggers)
+	if v := getenv("ANNUAL_NET_INCOME"); v != "" {
+		if c.AnnualNetIncome, err = strconv.ParseFloat(v, 64); err != nil {
+			return nil, fmt.Errorf("ANNUAL_NET_INCOME: %w", err)
+		}
+	}
+	if c.RetryInterval, err = time.ParseDuration(or(getenv("RETRY_INTERVAL"), "30m")); err != nil {
+		return nil, fmt.Errorf("RETRY_INTERVAL: %w", err)
+	}
+	c.ContextProviders = split(getenv("CONTEXT_PROVIDERS"))
+	c.Benchmarks = split(getenv("BENCHMARKS"))
+	c.RSSURLs = split(getenv("RSS_URLS"))
+	return c, nil
+}
+
+func or(v, d string) string {
+	if v == "" {
+		return d
+	}
+	return v
+}
+
+func split(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func parseFloats(s string) ([]float64, error) {
+	var out []float64
+	for _, p := range split(s) {
+		f, err := strconv.ParseFloat(p, 64)
+		if err != nil || f <= 0 {
+			return nil, fmt.Errorf("invalid number %q", p)
+		}
+		out = append(out, f)
+	}
+	return out, nil
+}
+
+func parseFunds(s string) ([]Fund, error) {
+	var out []Fund
+	for _, p := range split(s) {
+		code, typ, ok := strings.Cut(p, ":")
+		if !ok || code == "" {
+			return nil, fmt.Errorf("FUNDS entry %q must be code:type", p)
+		}
+		switch ft := FundType(strings.ToLower(strings.TrimSpace(typ))); ft {
+		case RMF, SSF, ThaiESG, Ordinary:
+			out = append(out, Fund{strings.TrimSpace(code), ft})
+		default:
+			return nil, fmt.Errorf("FUNDS entry %q: unknown type %q", p, typ)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("FUNDS is required")
+	}
+	return out, nil
+}

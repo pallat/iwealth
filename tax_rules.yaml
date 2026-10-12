@@ -1,0 +1,17 @@
+year: 2026
+brackets:        # up_to: 0 means no upper limit
+  - {up_to: 150000, rate: 0}
+  - {up_to: 300000, rate: 0.05}
+  - {up_to: 500000, rate: 0.10}
+  - {up_to: 750000, rate: 0.15}
+  - {up_to: 1000000, rate: 0.20}
+  - {up_to: 2000000, rate: 0.25}
+  - {up_to: 5000000, rate: 0.30}
+  - {up_to: 0, rate: 0.35}
+caps:
+  rmf: 500000
+  ssf: 200000
+  thaiesg: 300000
+combined:
+  cap: 500000
+  types: [rmf, ssf]
