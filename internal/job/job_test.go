@@ -976,3 +976,43 @@ func TestOverCapKeepsRecordedValueButCalculatesWithCap(t *testing.T) {
 		t.Errorf("/tax should flag the excess and use the capped group: %s", tr)
 	}
 }
+
+func TestReportCommand(t *testing.T) {
+	e := setup(t, config.Fund{Code: "ABC-RMF", Type: config.RMF})
+	ctx := context.Background()
+	e.now = day(10, 12).Add(10 * time.Hour)
+
+	empty := e.j.HandleCommand(ctx, "/report")
+	if !strings.Contains(empty, "รายงานค่าลดหย่อนปี 2026") || strings.Count(empty, "ยังไม่มีรายการ") != 2 {
+		t.Errorf("empty report: %s", empty)
+	}
+
+	e.j.HandleCommand(ctx, "/paid ABC-RMF 10000")
+	e.j.HandleCommand(ctx, "/paid ABC-RMF 5000.50")
+	e.j.HandleCommand(ctx, "/deduct pvd 60000")
+	e.st.AddPaid(ctx, "ABC-RMF", config.RMF, 9999, time.Date(2025, 6, 1, 0, 0, 0, 0, bangkok))
+
+	r := e.j.HandleCommand(ctx, "/report")
+	for _, w := range []string{"1. 2026-10-12 ABC-RMF 10,000", "2. 2026-10-12 ABC-RMF 5,000.50", "pvd", "60,000", "สรุปสิทธิ์ลดหย่อนปี 2026"} {
+		if !strings.Contains(r, w) {
+			t.Errorf("report missing %q:\n%s", w, r)
+		}
+	}
+	if strings.Contains(r, "9,999") {
+		t.Errorf("other year leaked:\n%s", r)
+	}
+	// other year, Gregorian and Buddhist
+	for _, in := range []string{"/report 2025", "/report 2568"} {
+		if r := e.j.HandleCommand(ctx, in); !strings.Contains(r, "2025-06-01 ABC-RMF 9,999") || strings.Contains(r, "10,000") {
+			t.Errorf("%s:\n%s", in, r)
+		}
+	}
+	for _, in := range []string{"/report abc", "/report 1999", "/report 2026 x"} {
+		if r := e.j.HandleCommand(ctx, in); !strings.Contains(r, "ไม่ถูกต้อง") {
+			t.Errorf("%q should be rejected: %s", in, r)
+		}
+	}
+	if h := e.j.HandleCommand(ctx, "hello"); !strings.Contains(h, "/report") {
+		t.Errorf("help lacks /report: %s", h)
+	}
+}

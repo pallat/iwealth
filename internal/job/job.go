@@ -16,6 +16,7 @@ import (
 	"github.com/pallat/iwealth/internal/notify/telegram"
 	"github.com/pallat/iwealth/internal/plan"
 	"github.com/pallat/iwealth/internal/sec"
+	"github.com/pallat/iwealth/internal/store"
 	"github.com/pallat/iwealth/internal/tax"
 )
 
@@ -37,6 +38,7 @@ type Store interface {
 	PaidByType(ctx context.Context, year int) (map[config.FundType]float64, error)
 	SetDeduction(ctx context.Context, year int, key config.FundType, amount float64) error
 	Deductions(ctx context.Context, year int) (map[config.FundType]float64, error)
+	PaidRows(ctx context.Context, year int) ([]store.PaidRow, error)
 	ReminderSent(ctx context.Context, day time.Time) (bool, error)
 	MarkReminderSent(ctx context.Context, day time.Time) error
 }
@@ -635,7 +637,7 @@ func (j *Job) yearEndMessage(ctx context.Context, d time.Time) string {
 
 // ---- commands ----
 
-const help = "คำสั่งที่ใช้ได้:\n/paid <กอง> <จำนวนเงิน> บันทึกยอดซื้อกองลดหย่อนภาษี\n/deduct <รายการ> <ยอดสะสมทั้งปี> บันทึกค่าลดหย่อนอื่น เช่น PVD, ประกันบำนาญ (0 = ลบ, /deduct เฉยๆ ดูรายการ)\n/tax สรุปสิทธิ์ลดหย่อนปีนี้"
+const help = "คำสั่งที่ใช้ได้:\n/paid <กอง> <จำนวนเงิน> บันทึกยอดซื้อกองลดหย่อนภาษี\n/deduct <รายการ> <ยอดสะสมทั้งปี> บันทึกค่าลดหย่อนอื่น เช่น PVD, ประกันบำนาญ (0 = ลบ, /deduct เฉยๆ ดูรายการ)\n/tax สรุปสิทธิ์ลดหย่อนปีนี้\n/report [ปี] รายงานรายการที่บันทึกไว้ทั้งหมด"
 
 func commandName(text string) string {
 	f := strings.Fields(text)
@@ -656,6 +658,8 @@ func (j *Job) HandleCommand(ctx context.Context, text string) string {
 		return j.paid(ctx, text)
 	case "/deduct":
 		return j.deduct(ctx, text)
+	case "/report":
+		return j.report(ctx, text)
 	case "/tax":
 		return j.taxSummary(ctx)
 	}
@@ -750,6 +754,54 @@ func (j *Job) overNote(paid map[config.FundType]float64, t config.FundType) stri
 	return fmt.Sprintf("\n  ⚠ เกินสิทธิ์ นับลดหย่อนได้ %s (ส่วนเกิน %s ไม่นับ)", money(ded), money(paid[t]-ded))
 }
 
+// report lists every recorded purchase and manual deduction for a year, then the
+// same summary as /tax. "/report 2025" (or a Buddhist year, 2568) picks another year.
+func (j *Job) report(ctx context.Context, text string) string {
+	year := bkkDate(j.now()).Year()
+	if f := strings.Fields(text); len(f) > 2 {
+		return "รูปแบบไม่ถูกต้อง ใช้: /report หรือ /report <ปี> เช่น /report 2026"
+	} else if len(f) == 2 {
+		y, err := strconv.Atoi(f[1])
+		if y > 2400 {
+			y -= 543
+		}
+		if err != nil || y < 2000 || y > 2100 {
+			return "ปีไม่ถูกต้อง ใช้เช่น /report 2026 หรือ /report 2569"
+		}
+		year = y
+	}
+	rows, err := j.Store.PaidRows(ctx, year)
+	if err != nil {
+		return "อ่านข้อมูลไม่สำเร็จ ลองใหม่อีกครั้ง"
+	}
+	manual, err := j.Store.Deductions(ctx, year)
+	if err != nil {
+		return "อ่านข้อมูลไม่สำเร็จ ลองใหม่อีกครั้ง"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "รายงานค่าลดหย่อนปี %d\n\nซื้อกองทุน (/paid)\n", year)
+	if len(rows) == 0 {
+		b.WriteString("  ยังไม่มีรายการ\n")
+	}
+	for i, r := range rows {
+		fmt.Fprintf(&b, "  %d. %s %s %s บาท\n", i+1, r.On.Format("2006-01-02"), r.Fund, amountStr(r.Amount))
+	}
+	b.WriteString("\nค่าลดหย่อนอื่น (/deduct, ยอดสะสม)\n")
+	n := 0
+	for _, m := range j.Rules.Manual {
+		if v := manual[m.Key]; v > 0 {
+			fmt.Fprintf(&b, "  %s (%s): %s บาท\n", m.Key, m.Label, amountStr(v))
+			n++
+		}
+	}
+	if n == 0 {
+		b.WriteString("  ยังไม่มีรายการ\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(j.summaryFor(ctx, year))
+	return b.String()
+}
+
 func (j *Job) deductList(ctx context.Context, year int) string {
 	manual, err := j.Store.Deductions(ctx, year)
 	if err != nil {
@@ -765,7 +817,10 @@ func (j *Job) deductList(ctx context.Context, year int) string {
 }
 
 func (j *Job) taxSummary(ctx context.Context) string {
-	year := bkkDate(j.now()).Year()
+	return j.summaryFor(ctx, bkkDate(j.now()).Year())
+}
+
+func (j *Job) summaryFor(ctx context.Context, year int) string {
 	paid, err := j.allPaid(ctx, year)
 	if err != nil {
 		return "อ่านข้อมูลไม่สำเร็จ ลองใหม่อีกครั้ง"

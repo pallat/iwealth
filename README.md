@@ -51,6 +51,7 @@ Items that share the overall retirement cap (RMF, SSF, provident fund, GPF, nati
 
 - `/paid <fund> <amount>`: record a purchase of a tax-deductible fund. Example: `/paid EXAMPLE-RMF 10000`.
 - `/deduct <key> <year-to-date total>`: record a deduction you do not buy through a tracked fund (keys: `pvd`, `gpf`, `nsf`, `teacher_fund`, `pension_ins`). The amount **replaces** the previous value, so send the running total for the year; `0` removes it. Example: `/deduct pvd 60000`. If you record more than an item can deduct (its baht cap or `pct:` limit, or past the shared cap), the amount stays recorded as entered, but room and tax estimates count only what is deductible and `/tax` and `/deduct` flag the excess. Plain `/deduct` lists the keys. RMF, SSF and Thai ESG use `/paid`.
+- `/report [year]`: list every recorded `/paid` purchase (date, fund, amount) and `/deduct` total for the year, followed by the `/tax` summary. `/report 2025` or a Buddhist year such as `/report 2568` picks another year.
 - `/tax`: show this year's used, cap and remaining room per item, the shared-cap position, and the estimated tax saved.
 
 ## Privacy

@@ -154,3 +154,37 @@ func (s *Store) MarkReminderSent(ctx context.Context, day time.Time) error {
 	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO year_end_reminder(day) VALUES(?)`, day.Format(dayFmt))
 	return err
 }
+
+// PaidRow is one recorded purchase.
+type PaidRow struct {
+	Fund   string
+	Type   config.FundType
+	Amount float64
+	On     time.Time
+}
+
+// PaidRows lists the year's purchases in the order they were recorded.
+func (s *Store) PaidRows(ctx context.Context, year int) ([]PaidRow, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT fund, type, amount, paid_on FROM tax_paid
+		WHERE paid_on >= ? AND paid_on < ? ORDER BY paid_on, id`,
+		time.Date(year, 1, 1, 0, 0, 0, 0, time.UTC).Format(dayFmt),
+		time.Date(year+1, 1, 1, 0, 0, 0, 0, time.UTC).Format(dayFmt))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PaidRow
+	for rows.Next() {
+		var r PaidRow
+		var t, on string
+		if err := rows.Scan(&r.Fund, &t, &r.Amount, &on); err != nil {
+			return nil, err
+		}
+		r.Type = config.FundType(t)
+		if r.On, err = time.Parse(dayFmt, on); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
