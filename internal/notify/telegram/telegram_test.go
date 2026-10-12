@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -227,5 +228,43 @@ func TestParseDeduct(t *testing.T) {
 		if _, _, err := ParseDeduct(in); err == nil {
 			t.Errorf("%q should fail", in)
 		}
+	}
+}
+
+func TestTimeoutMarginsCoverLongPoll(t *testing.T) {
+	if margin := pollTimeout - pollSeconds*time.Second; margin < 60*time.Second {
+		t.Errorf("long-poll margin %s is too thin for a slow link", margin)
+	}
+	if clientTimeout <= pollTimeout {
+		t.Errorf("client timeout %s must exceed the poll timeout %s", clientTimeout, pollTimeout)
+	}
+	if got := New("t", 1).HTTP.Timeout; got != clientTimeout {
+		t.Errorf("New client timeout = %s", got)
+	}
+	if got := (&Bot{}).client().Timeout; got != clientTimeout {
+		t.Errorf("fallback client timeout = %s", got)
+	}
+}
+
+func TestWithTimeoutNamesTheTimeout(t *testing.T) {
+	var err error
+	ctx, done := withTimeout(context.Background(), 10*time.Millisecond, "getUpdates", &err)
+	<-ctx.Done()
+	err = ctx.Err()
+	done()
+	if err == nil || !strings.Contains(err.Error(), "getUpdates: timed out after 10ms") {
+		t.Fatalf("err = %v", err)
+	}
+
+	// the caller's own cancellation is passed through untouched
+	parent, cancel := context.WithCancel(context.Background())
+	var err2 error
+	ctx2, done2 := withTimeout(parent, time.Minute, "sendMessage", &err2)
+	cancel()
+	<-ctx2.Done()
+	err2 = ctx2.Err()
+	done2()
+	if !errors.Is(err2, context.Canceled) {
+		t.Fatalf("err2 = %v", err2)
 	}
 }

@@ -18,6 +18,16 @@ import (
 
 const maxRunes = 4000
 
+// Timeouts. getUpdates is a long poll: Telegram holds the request for up to
+// pollSeconds, so the client must wait much longer than that or a slow link (a Pi on
+// WiFi) cuts the request off before Telegram answers. Margins are generous on purpose.
+const (
+	pollSeconds   = 30
+	pollTimeout   = pollSeconds*time.Second + 90*time.Second // per getUpdates request
+	sendTimeout   = 30 * time.Second                         // per sendMessage request
+	clientTimeout = 150 * time.Second                        // hard ceiling for any request
+)
+
 // Bot talks to the Telegram Bot API. The token is part of every request URL,
 // so errors are sanitized and never include it.
 type Bot struct {
@@ -42,7 +52,7 @@ func New(token string, chatID int64) *Bot {
 		Token:   token,
 		ChatID:  chatID,
 		BaseURL: "https://api.telegram.org",
-		HTTP:    &http.Client{Timeout: 45 * time.Second},
+		HTTP:    &http.Client{Timeout: clientTimeout},
 		backoff: 5 * time.Second,
 	}
 }
@@ -83,7 +93,7 @@ func (b *Bot) client() *http.Client {
 	if b.HTTP != nil {
 		return b.HTTP
 	}
-	return &http.Client{Timeout: 45 * time.Second}
+	return &http.Client{Timeout: clientTimeout}
 }
 
 // do performs the request and returns the decoded result, never leaking the token.
@@ -125,7 +135,21 @@ func (b *Bot) endpoint(method string) string {
 	return b.BaseURL + "/bot" + b.Token + "/" + method
 }
 
-func (b *Bot) sendOne(ctx context.Context, chatID int64, text string) error {
+// withTimeout bounds one request. A deadline hit here (as opposed to the caller's
+// ctx ending) is reported as a timeout instead of a bare "context deadline exceeded".
+func withTimeout(ctx context.Context, d time.Duration, method string, err *error) (context.Context, func()) {
+	c, cancel := context.WithTimeout(ctx, d)
+	return c, func() {
+		cancel()
+		if *err != nil && ctx.Err() == nil && errors.Is(*err, context.DeadlineExceeded) {
+			*err = fmt.Errorf("telegram %s: timed out after %s", method, d)
+		}
+	}
+}
+
+func (b *Bot) sendOne(ctx context.Context, chatID int64, text string) (err error) {
+	ctx, done := withTimeout(ctx, sendTimeout, "sendMessage", &err)
+	defer done()
 	payload, _ := json.Marshal(map[string]any{"chat_id": chatID, "text": text})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.endpoint("sendMessage"), bytes.NewReader(payload))
 	if err != nil {
@@ -156,8 +180,10 @@ func (b *Bot) sendTo(ctx context.Context, chatID int64, text string) error {
 	return nil
 }
 
-func (b *Bot) getUpdates(ctx context.Context, offset int64) ([]update, error) {
-	u := b.endpoint("getUpdates") + "?timeout=30&offset=" + strconv.FormatInt(offset, 10)
+func (b *Bot) getUpdates(ctx context.Context, offset int64) (_ []update, err error) {
+	ctx, done := withTimeout(ctx, pollTimeout, "getUpdates", &err)
+	defer done()
+	u := b.endpoint("getUpdates") + "?timeout=" + strconv.Itoa(pollSeconds) + "&offset=" + strconv.FormatInt(offset, 10)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, fmt.Errorf("telegram getUpdates: build request")
