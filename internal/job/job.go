@@ -688,7 +688,7 @@ func (j *Job) paid(ctx context.Context, text string) string {
 	if err != nil {
 		return fmt.Sprintf("บันทึก %s %s บาท แล้ว (อ่านยอดรวมไม่สำเร็จ)", fund.Code, amountStr(amount))
 	}
-	byType, _ := plan.SavedSoFar(j.Rules, j.Cfg.AnnualNetIncome, paid)
+	byType, _ := plan.SavedSoFar(j.Rules, j.Cfg.AnnualNetIncome, j.Cfg.AnnualGrossIncome, paid)
 	return fmt.Sprintf("บันทึก %s %s บาท แล้ว (บันทึกซ้ำจะนับเพิ่ม)\n%s ปี %d: ซื้อแล้ว %s | สิทธิ์คงเหลือ %s | ประหยัดภาษีโดยประมาณ %s บาท",
 		fund.Code, amountStr(amount), label(fund.Type), on.Year(),
 		money(paid[fund.Type]), money(j.Rules.RemainingRoom(fund.Type, paid, j.Cfg.AnnualGrossIncome)),
@@ -730,14 +730,24 @@ func (j *Job) deduct(ctx context.Context, text string) string {
 // combined cap, the combined position.
 func (j *Job) roomLines(paid map[config.FundType]float64, t config.FundType) string {
 	gross := j.Cfg.AnnualGrossIncome
-	out := fmt.Sprintf("%s: ใช้แล้ว %s / เพดาน %s | คงเหลือ %s", j.Rules.Label(t),
-		money(paid[t]), money(j.Rules.ItemCap(t, gross)), money(j.Rules.RemainingRoom(t, paid, gross)))
+	out := fmt.Sprintf("%s: ใช้แล้ว %s / เพดาน %s | คงเหลือ %s%s", j.Rules.Label(t),
+		money(paid[t]), money(j.Rules.ItemCap(t, gross)), money(j.Rules.RemainingRoom(t, paid, gross)), j.overNote(paid, t))
 	if slices.Contains(j.Rules.Combined.Types, t) {
-		used := j.Rules.CombinedUsed(paid)
+		used := j.Rules.CombinedUsed(paid, gross)
 		out += fmt.Sprintf("\nกลุ่มเพดานรวม: ใช้แล้ว %s / %s | คงเหลือ %s",
 			money(used), money(j.Rules.Combined.Cap), money(max(j.Rules.Combined.Cap-used, 0)))
 	}
 	return out
+}
+
+// overNote flags a recorded amount that exceeds what can be deducted. The amount
+// stays recorded as entered; only the calculations use the capped value.
+func (j *Job) overNote(paid map[config.FundType]float64, t config.FundType) string {
+	ded := j.Rules.Deductible(paid, j.Cfg.AnnualGrossIncome)[t]
+	if paid[t]-ded < 0.005 {
+		return ""
+	}
+	return fmt.Sprintf("\n  ⚠ เกินสิทธิ์ นับลดหย่อนได้ %s (ส่วนเกิน %s ไม่นับ)", money(ded), money(paid[t]-ded))
 }
 
 func (j *Job) deductList(ctx context.Context, year int) string {
@@ -779,13 +789,13 @@ func (j *Job) taxSummary(ctx context.Context) string {
 	gross := j.Cfg.AnnualGrossIncome
 	var b strings.Builder
 	fmt.Fprintf(&b, "สรุปสิทธิ์ลดหย่อนปี %d\n", year)
-	byType, total := plan.SavedSoFar(j.Rules, j.Cfg.AnnualNetIncome, paid)
+	byType, total := plan.SavedSoFar(j.Rules, j.Cfg.AnnualNetIncome, j.Cfg.AnnualGrossIncome, paid)
 	for _, t := range keys {
-		fmt.Fprintf(&b, "%s: ใช้แล้ว %s / เพดาน %s | คงเหลือ %s | ประหยัดภาษีโดยประมาณ %s บาท\n",
+		fmt.Fprintf(&b, "%s: ใช้แล้ว %s / เพดาน %s | คงเหลือ %s | ประหยัดภาษีโดยประมาณ %s บาท%s\n",
 			j.Rules.Label(t), money(paid[t]), money(j.Rules.ItemCap(t, gross)),
-			money(j.Rules.RemainingRoom(t, paid, gross)), money(byType[t]))
+			money(j.Rules.RemainingRoom(t, paid, gross)), money(byType[t]), j.overNote(paid, t))
 	}
-	if used := j.Rules.CombinedUsed(paid); len(j.Rules.Combined.Types) > 0 {
+	if used := j.Rules.CombinedUsed(paid, gross); len(j.Rules.Combined.Types) > 0 {
 		fmt.Fprintf(&b, "กลุ่มเพดานรวม: ใช้แล้ว %s / %s | คงเหลือ %s\n",
 			money(used), money(j.Rules.Combined.Cap), money(max(j.Rules.Combined.Cap-used, 0)))
 	}

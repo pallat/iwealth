@@ -54,7 +54,7 @@ func TestBuildAccountsForRecordedPurchases(t *testing.T) {
 func TestSavedSoFar(t *testing.T) {
 	r := realRules()
 	paid := map[config.FundType]float64{config.RMF: 300000, config.SSF: 100000}
-	by, total := SavedSoFar(r, 1000000, paid)
+	by, total := SavedSoFar(r, 1000000, 0, paid)
 	// total = Tax(1M)-Tax(600k); rmf first (marginal at the top), ssf next.
 	want := r.Tax(1000000) - r.Tax(600000)
 	if total != want {
@@ -66,7 +66,22 @@ func TestSavedSoFar(t *testing.T) {
 	if by[config.RMF] != r.Tax(1000000)-r.Tax(700000) {
 		t.Fatalf("rmf %v", by[config.RMF])
 	}
-	if _, tot := SavedSoFar(r, 100000, paid); tot != 0 {
+	if _, tot := SavedSoFar(r, 100000, 0, paid); tot != 0 {
 		t.Fatalf("below threshold %v", tot)
+	}
+}
+
+func TestOverCapCountsOnlyUpToCap(t *testing.T) {
+	r := rules() // brackets 0/5/10/20%, ssf cap 200k
+	// 250k bought in SSF counts as 200k: same saving as exactly 200k
+	over := map[config.FundType]float64{config.SSF: 250000}
+	exact := map[config.FundType]float64{config.SSF: 200000}
+	_, a := SavedSoFar(r, 600000, 0, over)
+	_, b := SavedSoFar(r, 600000, 0, exact)
+	if a != b || a == 0 {
+		t.Fatalf("over-cap saving %v want %v", a, b)
+	}
+	if got := taxableBase(r, 600000, 0, over); got != 400000 {
+		t.Fatalf("base = %v", got)
 	}
 }

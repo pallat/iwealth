@@ -136,3 +136,36 @@ func TestManualAndPctRoom(t *testing.T) {
 		t.Error("IsManual/Label")
 	}
 }
+
+func TestDeductibleClampsToCaps(t *testing.T) {
+	r := rules()
+	r.Manual = []Manual{{Key: "pvd"}, {Key: "pension_ins"}}
+	r.Caps["pvd"] = 500000
+	r.Caps["pension_ins"] = 200000
+	r.Combined.Types = []config.FundType{config.RMF, config.SSF, "pvd", "pension_ins"}
+	r.Pct = map[config.FundType]float64{"pension_ins": 0.15}
+
+	// pension insurance 250k -> 200k item cap
+	d := r.Deductible(map[config.FundType]float64{"pension_ins": 250000}, 0)
+	if d["pension_ins"] != 200000 {
+		t.Errorf("item cap: %v", d)
+	}
+	// with gross 1,000,000, 15% = 150k wins
+	d = r.Deductible(map[config.FundType]float64{"pension_ins": 250000}, 1000000)
+	if d["pension_ins"] != 150000 {
+		t.Errorf("pct cap: %v", d)
+	}
+	// group cap: rmf 400k + pvd 300k + pension 200k = 900k raw -> 500k allocated in order
+	paid := map[config.FundType]float64{config.RMF: 400000, "pvd": 300000, "pension_ins": 200000}
+	d = r.Deductible(paid, 0)
+	if d[config.RMF] != 400000 || d["pvd"] != 100000 || d["pension_ins"] != 0 {
+		t.Errorf("group allocation: %v", d)
+	}
+	if got := r.CombinedUsed(paid, 0); got != 500000 {
+		t.Errorf("CombinedUsed = %v", got)
+	}
+	// over-cap entry must not eat into group room beyond its cap
+	if got := r.RemainingRoom(config.RMF, map[config.FundType]float64{"pension_ins": 250000}, 0); got != 300000 {
+		t.Errorf("RMF room = %v want 300000", got)
+	}
+}

@@ -951,3 +951,28 @@ func TestYearEndReminderSendFailureRetries(t *testing.T) {
 		t.Fatalf("failed send must retry on next tick: %d", len(e.n.msgs))
 	}
 }
+
+func TestOverCapKeepsRecordedValueButCalculatesWithCap(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	e.now = day(10, 12).Add(10 * time.Hour)
+
+	r := e.j.HandleCommand(ctx, "/deduct pension_ins 250000")
+	if m, _ := e.st.Deductions(ctx, 2026); m["pension_ins"] != 250000 {
+		t.Fatalf("recorded value must stay as entered: %v", m)
+	}
+	// group uses 200k (not 250k): 300k left; the reply warns about the 50k excess
+	for _, w := range []string{"250,000", "200,000", "ส่วนเกิน " + money(50000), money(300000)} {
+		if !strings.Contains(r, w) {
+			t.Errorf("reply missing %q: %s", w, r)
+		}
+	}
+	paid, _ := e.j.allPaid(ctx, 2026)
+	if got := e.j.Rules.RemainingRoom(config.RMF, paid, 0); got != 300000 {
+		t.Errorf("RMF room = %v want 300000", got)
+	}
+	tr := e.j.HandleCommand(ctx, "/tax")
+	if !strings.Contains(tr, "เกินสิทธิ์") || !strings.Contains(tr, money(300000)) {
+		t.Errorf("/tax should flag the excess and use the capped group: %s", tr)
+	}
+}

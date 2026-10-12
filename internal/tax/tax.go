@@ -176,11 +176,40 @@ func (r *Rules) ItemCap(t config.FundType, grossIncome float64) float64 {
 	return cap
 }
 
-// CombinedUsed is how much of the shared cap the recorded amounts take.
-func (r *Rules) CombinedUsed(paid map[config.FundType]float64) float64 {
+// Deductible is what each recorded amount is worth after the limits: each item is
+// capped at ItemCap, then items sharing the combined cap are allocated in
+// Deductions() order until it runs out. Keys without a cap entry count in full.
+func (r *Rules) Deductible(paid map[config.FundType]float64, grossIncome float64) map[config.FundType]float64 {
+	out := map[config.FundType]float64{}
+	groupLeft := r.Combined.Cap
+	keys := r.Deductions()
+	for t := range paid {
+		if !slices.Contains(keys, t) {
+			keys = append(keys, t) // unknown key: counted as recorded
+		}
+	}
+	for _, t := range keys {
+		v := paid[t]
+		if _, ok := r.Caps[t]; ok {
+			v = min(v, r.ItemCap(t, grossIncome))
+		}
+		if slices.Contains(r.Combined.Types, t) {
+			v = min(v, max(groupLeft, 0))
+			groupLeft -= v
+		}
+		if v != 0 {
+			out[t] = v
+		}
+	}
+	return out
+}
+
+// CombinedUsed is how much of the shared cap the recorded amounts take, after the limits.
+func (r *Rules) CombinedUsed(paid map[config.FundType]float64, grossIncome float64) float64 {
+	ded := r.Deductible(paid, grossIncome)
 	var used float64
 	for _, ct := range r.Combined.Types {
-		used += paid[ct]
+		used += ded[ct]
 	}
 	return used
 }
@@ -193,7 +222,7 @@ func (r *Rules) RemainingRoom(t config.FundType, paid map[config.FundType]float6
 	}
 	room := r.ItemCap(t, grossIncome) - paid[t]
 	if slices.Contains(r.Combined.Types, t) {
-		room = min(room, r.Combined.Cap-r.CombinedUsed(paid))
+		room = min(room, r.Combined.Cap-r.CombinedUsed(paid, grossIncome))
 	}
 	return max(room, 0)
 }
