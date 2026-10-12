@@ -6,7 +6,7 @@
 
 **Architecture:** Deterministic pipeline (`sec -> store -> dip -> plan -> advisor -> telegram`). Money math lives in pure Go packages. The ADK agent (DeepSeek via a custom `model.LLM` adapter) only writes the narrative, only on alert days, and never sees income or holdings.
 
-**Tech Stack:** Go (go.mod `go 1.25`), `google.golang.org/adk` v1.8.0, `google.golang.org/genai`, `modernc.org/sqlite`, `github.com/joho/godotenv`, `gopkg.in/yaml.v3`, stdlib `net/http` for SEC/DeepSeek/Telegram.
+**Tech Stack:** Go 1.27 (go.mod `go 1.27`), `google.golang.org/adk/v2` v2.5.0, `google.golang.org/genai`, `modernc.org/sqlite`, `github.com/joho/godotenv`, `gopkg.in/yaml.v3`, stdlib `net/http` for SEC/DeepSeek/Telegram.
 
 **Spec:** `docs/superpowers/specs/2026-10-12-iwealth-agent-design.md`
 
@@ -92,8 +92,8 @@ func Load(getenv func(string) string) (*Config, error)
 ```bash
 cd /Users/pallat/workspace/github.com/pallat/iwealth
 go mod init github.com/pallat/iwealth
-go mod edit -go=1.25
-go get google.golang.org/adk@v1.8.0 modernc.org/sqlite github.com/joho/godotenv gopkg.in/yaml.v3
+go mod edit -go=1.27
+go get google.golang.org/adk/v2@v2.5.0 modernc.org/sqlite github.com/joho/godotenv gopkg.in/yaml.v3
 ```
 
 - [ ] **Step 2: Write the failing test** `internal/config/config_test.go`
@@ -1056,7 +1056,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 )
 
@@ -1127,7 +1127,7 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 )
 
@@ -1258,7 +1258,7 @@ import (
 	"strings"
 	"testing"
 
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 )
 
@@ -1309,11 +1309,11 @@ import (
 	"fmt"
 	"strings"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
 	"google.golang.org/genai"
 )
 
@@ -1373,7 +1373,7 @@ func (a *Advisor) Summarize(ctx context.Context, facts string) (string, error) {
 
 `seq` is only touched from the single job goroutine; if that changes, guard with a mutex.
 
-- [ ] **Step 4: Run to verify pass** — `go test ./internal/advisor/ -v` → PASS. If `llmagent.Config` or `agent.RunConfig` fields differ, check `go doc google.golang.org/adk/agent/llmagent Config` (v1.8.0 quickstart uses Name/Model/Description/Instruction).
+- [ ] **Step 4: Run to verify pass** — `go test ./internal/advisor/ -v` → PASS. If `llmagent.Config` or `agent.RunConfig` fields differ, check `go doc google.golang.org/adk/v2/agent/llmagent Config` (v2.5.0 verified: Name/Model/Description/Instruction).
 - [ ] **Step 5: Commit** — `git add -A && git commit -m "feat: ADK advisor agent"`
 
 ---
