@@ -1,0 +1,8 @@
+{
+  "message": "success",
+  "page_size": 100,
+  "next_cursor": "",
+  "items": [
+    {"proj_id": "M0001_2550", "unique_id": "C0000000001", "fund_class_name": "", "nav_date": "2026-10-09", "net_asset": 1250000000.5, "last_val": 12.3456, "sell_price": 12.3456, "buy_price": 12.3456, "sell_swap_price": 12.3456, "buy_swap_price": 12.3456, "last_upd_date": "2026-10-09T20:01:11.123"}
+  ]
+}

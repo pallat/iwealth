@@ -1,0 +1,9 @@
+{
+  "message": "success",
+  "page_size": 100,
+  "next_cursor": "",
+  "items": [
+    {"unique_id": "C0000000001", "proj_id": "M0001_2550", "proj_name_en": "Example Retirement Mutual Fund", "proj_abbr_name": "EXAMPLE-RMF", "fund_status": "RG", "fund_class_name": "", "last_upd_date": "2026-10-09T08:15:30.123456"},
+    {"unique_id": "C0000000001", "proj_id": "M0002_2551", "proj_name_en": "Example Retirement Mutual Fund Plus", "proj_abbr_name": "EXAMPLE-RMF-PLUS", "fund_status": "RG", "fund_class_name": "", "last_upd_date": "2026-10-09T08:15:30"}
+  ]
+}
