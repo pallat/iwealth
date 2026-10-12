@@ -21,6 +21,8 @@ import (
 	"time"
 )
 
+const maxBody = 4 << 20
+
 // NAVSource returns the published NAV of a fund.
 type NAVSource interface {
 	// DailyNAV returns ok=false (nil error) when SEC has not published a NAV for that date yet.
@@ -83,9 +85,12 @@ func (c *Client) get(ctx context.Context, path string, q url.Values, out any) (f
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return false, fmt.Errorf("sec: GET %s: status %d", path, resp.StatusCode)
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return false, fmt.Errorf("sec: read %s: %w", path, err)
+	}
+	if len(body) > maxBody {
+		return false, fmt.Errorf("sec: GET %s: response exceeds %d bytes", path, maxBody)
 	}
 	if err := json.Unmarshal(body, out); err != nil {
 		return false, fmt.Errorf("sec: decode %s: %w", path, err)
@@ -140,15 +145,16 @@ var dateLayouts = []string{
 }
 
 // sameDay reports whether the API date string is the calendar day of d.
-// The date part is compared as written (no timezone shifting).
-func sameDay(s string, d time.Time) bool {
+// The date part is compared as written (no timezone shifting). A non-empty
+// string that matches no known layout is an error.
+func sameDay(s string, d time.Time) (bool, error) {
 	s = strings.TrimSpace(s)
 	for _, l := range dateLayouts {
 		if t, err := time.Parse(l, s); err == nil {
-			return t.Format("2006-01-02") == d.Format("2006-01-02")
+			return t.Format("2006-01-02") == d.Format("2006-01-02"), nil
 		}
 	}
-	return false
+	return false, fmt.Errorf("sec: unrecognised nav_date format %q", s)
 }
 
 func (c *Client) DailyNAV(ctx context.Context, fundCode string, date time.Time) (float64, bool, error) {
@@ -157,6 +163,7 @@ func (c *Client) DailyNAV(ctx context.Context, fundCode string, date time.Time) 
 		return 0, false, err
 	}
 	day := date.Format("2006-01-02")
+	var vals []float64
 	cursor := ""
 	for {
 		q := url.Values{"proj_id": {id}, "start_nav_date": {day}, "end_nav_date": {day}, "page_size": {"100"}}
@@ -169,22 +176,38 @@ func (c *Client) DailyNAV(ctx context.Context, fundCode string, date time.Time) 
 			return 0, false, err
 		}
 		if !found {
-			return 0, false, nil
+			break
 		}
 		for _, it := range p.Items {
-			if !sameDay(it.NavDate, date) {
+			if it.ProjID != id || strings.TrimSpace(it.NavDate) == "" {
+				continue
+			}
+			same, err := sameDay(it.NavDate, date)
+			if err != nil {
+				return 0, false, err
+			}
+			if !same {
 				continue
 			}
 			if it.LastVal <= 0 {
 				return 0, false, fmt.Errorf("sec: invalid NAV %v for %s on %s", it.LastVal, fundCode, day)
 			}
-			return it.LastVal, true, nil
+			vals = append(vals, it.LastVal)
 		}
 		if p.NextCursor == "" {
-			return 0, false, nil
+			break
 		}
 		cursor = p.NextCursor
 	}
+	if len(vals) == 0 {
+		return 0, false, nil
+	}
+	for _, v := range vals[1:] {
+		if v != vals[0] {
+			return 0, false, fmt.Errorf("sec: ambiguous multi-class NAV for %s on %s", fundCode, day)
+		}
+	}
+	return vals[0], true, nil
 }
 
 var _ NAVSource = (*Client)(nil)
