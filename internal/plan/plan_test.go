@@ -20,14 +20,14 @@ func rules() *tax.Rules {
 }
 
 func TestBuild(t *testing.T) {
-	p, ok := Build(rules(), 600000, map[config.FundType]float64{config.SSF: 100000}, config.SSF)
+	p, ok := Build(rules(), 600000, 0, map[config.FundType]float64{config.SSF: 100000}, config.SSF)
 	if !ok || p.Room != 100000 || p.Suggested != 100000 || p.TaxSaved != 10000 {
 		t.Fatalf("%+v %v", p, ok)
 	}
-	if _, ok := Build(rules(), 600000, nil, config.Ordinary); ok {
+	if _, ok := Build(rules(), 600000, 0, nil, config.Ordinary); ok {
 		t.Fatal("ordinary must have no plan")
 	}
-	if _, ok := Build(rules(), 600000, map[config.FundType]float64{config.SSF: 200000}, config.SSF); ok {
+	if _, ok := Build(rules(), 600000, 0, map[config.FundType]float64{config.SSF: 200000}, config.SSF); ok {
 		t.Fatal("no room must have no plan")
 	}
 }
@@ -45,7 +45,7 @@ func realRules() *tax.Rules {
 
 func TestBuildAccountsForRecordedPurchases(t *testing.T) {
 	// income 1M before fund deductions, RMF paid 300k, SSF room 200k: Tax(700k)-Tax(500k).
-	p, ok := Build(realRules(), 1000000, map[config.FundType]float64{config.RMF: 300000}, config.SSF)
+	p, ok := Build(realRules(), 1000000, 0, map[config.FundType]float64{config.RMF: 300000}, config.SSF)
 	if !ok || p.Room != 200000 || p.TaxSaved != 30000 {
 		t.Fatalf("%+v %v", p, ok)
 	}

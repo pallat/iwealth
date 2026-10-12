@@ -250,3 +250,24 @@ func ParsePaid(text string) (fund string, amount float64, err error) {
 	}
 	return f[1], amount, nil
 }
+
+// ParseDeduct parses "/deduct <key> <amount>" (also "/deduct@BotName ..."). The
+// amount is a year-to-date total; 0 clears the entry.
+func ParseDeduct(text string) (key string, amount float64, err error) {
+	f := strings.Fields(text)
+	cmd := ""
+	if len(f) > 0 {
+		cmd = f[0]
+		if i := strings.IndexByte(cmd, '@'); i >= 0 {
+			cmd = cmd[:i]
+		}
+	}
+	if len(f) != 3 || cmd != "/deduct" {
+		return "", 0, errors.New("usage: /deduct <key> <amount>")
+	}
+	amount, err = strconv.ParseFloat(f[2], 64)
+	if err != nil || math.IsNaN(amount) || math.IsInf(amount, 0) || amount < 0 {
+		return "", 0, errors.New("amount must be a number, 0 or greater")
+	}
+	return strings.ToLower(f[1]), amount, nil
+}

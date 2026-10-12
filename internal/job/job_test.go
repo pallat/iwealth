@@ -85,8 +85,11 @@ func setup(t *testing.T, funds ...config.Fund) *env {
 		Year:     2026,
 		Brackets: []tax.Bracket{{UpTo: 150000, Rate: 0}, {UpTo: 1000000, Rate: 0.2}, {UpTo: 0, Rate: 0.35}},
 		Caps:     map[config.FundType]float64{config.RMF: 500000, config.SSF: 200000, config.ThaiESG: 300000},
-		Combined: tax.Combined{Cap: 500000, Types: []config.FundType{config.RMF, config.SSF}},
+		Combined: tax.Combined{Cap: 500000, Types: []config.FundType{config.RMF, config.SSF, "pvd", "pension_ins"}},
+		Manual:   []tax.Manual{{Key: "pvd", Label: "PVD"}, {Key: "pension_ins", Label: "ประกันบำนาญ"}},
 	}
+	rules.Caps["pvd"] = 500000
+	rules.Caps["pension_ins"] = 200000
 	if len(funds) == 0 {
 		funds = []config.Fund{{Code: "ABC-RMF", Type: config.RMF}}
 	}
@@ -337,7 +340,7 @@ func TestFactsNeverContainIncomeOrAmounts(t *testing.T) {
 			t.Errorf("facts missing %q:\n%s", w, f)
 		}
 	}
-	room := e.j.Rules.RemainingRoom(config.RMF, nil)
+	room := e.j.Rules.RemainingRoom(config.RMF, nil, 0)
 	saved := e.j.Rules.TaxSaved(income, room)
 	for _, bad := range []string{
 		"812345", "812,345", money(income), money(room), "500000", "500,000", money(saved), fmt.Sprintf("%.0f", saved),
@@ -355,7 +358,7 @@ func TestHandleCommand(t *testing.T) {
 	e.now = d.Add(10 * time.Hour)
 
 	r := e.j.HandleCommand(ctx, "/paid abc-rmf 10000")
-	room := e.j.Rules.RemainingRoom(config.RMF, map[config.FundType]float64{config.RMF: 10000})
+	room := e.j.Rules.RemainingRoom(config.RMF, map[config.FundType]float64{config.RMF: 10000}, 0)
 	saved := e.j.Rules.TaxSaved(income, 10000)
 	for _, w := range []string{"บันทึก", "ABC-RMF", money(10000), money(room), money(saved)} {
 		if !strings.Contains(r, w) {
@@ -382,7 +385,7 @@ func TestHandleCommand(t *testing.T) {
 		}
 	}
 	tr := e.j.HandleCommand(ctx, "/tax")
-	for _, w := range []string{"RMF", money(20000), money(500000), money(e.j.Rules.RemainingRoom(config.RMF, map[config.FundType]float64{config.RMF: 20000}))} {
+	for _, w := range []string{"RMF", money(20000), money(500000), money(e.j.Rules.RemainingRoom(config.RMF, map[config.FundType]float64{config.RMF: 20000}, 0))} {
 		if !strings.Contains(tr, w) {
 			t.Errorf("/tax missing %q: %s", w, tr)
 		}
@@ -710,5 +713,71 @@ func TestAdvisorErrorIsLogged(t *testing.T) {
 	}
 	if !strings.Contains(out, "nav found") {
 		t.Fatalf("nav result not logged: %s", out)
+	}
+}
+
+func TestDeductCommand(t *testing.T) {
+	e := setup(t, config.Fund{Code: "ABC-RMF", Type: config.RMF})
+	ctx := context.Background()
+	e.now = day(10, 12).Add(10 * time.Hour)
+
+	e.j.HandleCommand(ctx, "/paid ABC-RMF 100000")
+	r := e.j.HandleCommand(ctx, "/deduct pvd 60000")
+	// 100k RMF + 60k PVD share the 500k group: 340k left
+	for _, w := range []string{"PVD", money(60000), money(340000)} {
+		if !strings.Contains(r, w) {
+			t.Errorf("deduct reply missing %q: %s", w, r)
+		}
+	}
+	// set semantics: a second call replaces, not adds
+	e.j.HandleCommand(ctx, "/deduct pvd 90000")
+	if m, _ := e.st.Deductions(ctx, 2026); m["pvd"] != 90000 {
+		t.Fatalf("set should replace: %v", m)
+	}
+	// room for RMF now reflects the manual entry
+	if r := e.j.HandleCommand(ctx, "/tax"); !strings.Contains(r, money(310000)) || !strings.Contains(r, "PVD") {
+		t.Errorf("/tax should show combined room: %s", r)
+	}
+	// plan on dip alert uses the same room
+	paid, _ := e.j.allPaid(ctx, 2026)
+	if got := e.j.Rules.RemainingRoom(config.RMF, paid, 0); got != 310000 {
+		t.Errorf("room = %v", got)
+	}
+	// 0 clears
+	e.j.HandleCommand(ctx, "/deduct pvd 0")
+	if m, _ := e.st.Deductions(ctx, 2026); len(m) != 0 {
+		t.Fatalf("0 should clear: %v", m)
+	}
+	// rejected inputs record nothing
+	for _, in := range []string{"/deduct rmf 5", "/deduct nope 5", "/deduct pvd -5", "/deduct pvd abc", "/deduct pvd"} {
+		e.j.HandleCommand(ctx, in)
+		if m, _ := e.st.Deductions(ctx, 2026); len(m) != 0 {
+			t.Errorf("%q recorded %v", in, m)
+		}
+	}
+	if r := e.j.HandleCommand(ctx, "/deduct"); !strings.Contains(r, "pvd") || !strings.Contains(r, "pension_ins") {
+		t.Errorf("list: %s", r)
+	}
+	if h := e.j.HandleCommand(ctx, "hello"); !strings.Contains(h, "/deduct") {
+		t.Errorf("help lacks /deduct: %s", h)
+	}
+}
+
+func TestGrossIncomeLimitsRoom(t *testing.T) {
+	e := setup(t)
+	e.j.Rules.Pct = map[config.FundType]float64{config.RMF: 0.3}
+	e.j.Cfg.AnnualGrossIncome = 600000 // 30% = 180,000
+	ctx := context.Background()
+	e.now = day(10, 12).Add(10 * time.Hour)
+	r := e.j.HandleCommand(ctx, "/paid ABC-RMF 50000")
+	if !strings.Contains(r, money(130000)) {
+		t.Errorf("room should be 180k-50k: %s", r)
+	}
+	if tr := e.j.HandleCommand(ctx, "/tax"); strings.Contains(tr, "ANNUAL_GROSS_INCOME") {
+		t.Errorf("no gross hint expected when set: %s", tr)
+	}
+	e.j.Cfg.AnnualGrossIncome = 0
+	if tr := e.j.HandleCommand(ctx, "/tax"); !strings.Contains(tr, "ANNUAL_GROSS_INCOME") {
+		t.Errorf("hint expected when gross unset: %s", tr)
 	}
 }

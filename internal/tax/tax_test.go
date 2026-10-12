@@ -58,7 +58,7 @@ func TestRemainingRoom(t *testing.T) {
 		{"ordinary has none", config.Ordinary, nil, 0},
 	}
 	for _, c := range cases {
-		if got := r.RemainingRoom(c.typ, c.paid); got != c.want {
+		if got := r.RemainingRoom(c.typ, c.paid, 0); got != c.want {
 			t.Errorf("%s: got %v want %v", c.name, got, c.want)
 		}
 	}
@@ -79,15 +79,20 @@ func TestLoadRulesValidation(t *testing.T) {
 		t.Fatalf("valid rules rejected: %v", err)
 	}
 	cases := map[string]struct{ body, want string }{
-		"descending":    {"brackets:\n  - {up_to: 200, rate: 0}\n  - {up_to: 100, rate: 0.1}\n  - {up_to: 0, rate: 0.2}\n", "ascending"},
-		"no open top":   {"brackets:\n  - {up_to: 100, rate: 0}\n  - {up_to: 200, rate: 0.1}\n", "open"},
-		"open mid":      {"brackets:\n  - {up_to: 0, rate: 0}\n  - {up_to: 0, rate: 0.1}\n", "ascending"},
-		"rate high":     {"brackets:\n  - {up_to: 0, rate: 1.5}\n", "rate"},
-		"rate negative": {"brackets:\n  - {up_to: 0, rate: -0.1}\n", "rate"},
-		"unknown cap":   {ok + "caps: {foo: 1}\n", "foo"},
-		"upper cap":     {ok + "caps: {RMF: 1}\n", "RMF"},
-		"unknown comb":  {ok + "combined: {cap: 1, types: [bar]}\n", "bar"},
-		"ordinary cap":  {ok + "caps: {ordinary: 1}\n", "ordinary"},
+		"descending":      {"brackets:\n  - {up_to: 200, rate: 0}\n  - {up_to: 100, rate: 0.1}\n  - {up_to: 0, rate: 0.2}\n", "ascending"},
+		"no open top":     {"brackets:\n  - {up_to: 100, rate: 0}\n  - {up_to: 200, rate: 0.1}\n", "open"},
+		"open mid":        {"brackets:\n  - {up_to: 0, rate: 0}\n  - {up_to: 0, rate: 0.1}\n", "ascending"},
+		"rate high":       {"brackets:\n  - {up_to: 0, rate: 1.5}\n", "rate"},
+		"rate negative":   {"brackets:\n  - {up_to: 0, rate: -0.1}\n", "rate"},
+		"unknown cap":     {ok + "caps: {foo: 1}\n", "foo"},
+		"upper cap":       {ok + "caps: {RMF: 1}\n", "RMF"},
+		"unknown comb":    {ok + "combined: {cap: 1, types: [bar]}\n", "bar"},
+		"ordinary cap":    {ok + "caps: {ordinary: 1}\n", "ordinary"},
+		"manual reserved": {ok + "manual: [{key: rmf}]\n", "reserved"},
+		"manual upper":    {ok + "manual: [{key: PVD}]\n", "lower-case"},
+		"manual dup":      {ok + "manual: [{key: a}, {key: a}]\n", "duplicate"},
+		"pct too big":     {ok + "caps: {rmf: 1}\npct: {rmf: 30}\n", "pct"},
+		"pct unknown":     {ok + "pct: {zzz: 0.3}\n", "zzz"},
 	}
 	for name, c := range cases {
 		_, err := LoadRules(writeRules(t, c.body))
@@ -100,5 +105,34 @@ func TestLoadRulesValidation(t *testing.T) {
 func TestShippedRulesLoad(t *testing.T) {
 	if _, err := LoadRules("../../tax_rules.yaml"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestManualAndPctRoom(t *testing.T) {
+	r := rules()
+	r.Manual = []Manual{{Key: "pvd", Label: "PVD"}, {Key: "pension_ins", Label: "Pension"}}
+	r.Caps["pvd"] = 500000
+	r.Caps["pension_ins"] = 200000
+	r.Combined.Types = []config.FundType{config.RMF, config.SSF, "pvd", "pension_ins"}
+	r.Pct = map[config.FundType]float64{config.RMF: 0.3, "pension_ins": 0.15}
+
+	paid := map[config.FundType]float64{"pvd": 100000, config.RMF: 50000}
+	if got := r.RemainingRoom(config.RMF, paid, 0); got != 350000 { // 500k group - 150k; pct ignored w/o gross
+		t.Errorf("no gross: %v", got)
+	}
+	if got := r.RemainingRoom(config.RMF, paid, 600000); got != 130000 { // 30%*600k=180k - 50k
+		t.Errorf("gross pct: %v", got)
+	}
+	if got := r.RemainingRoom("pension_ins", paid, 600000); got != 90000 { // 15%*600k
+		t.Errorf("pension pct: %v", got)
+	}
+	if got := r.RemainingRoom("pension_ins", map[config.FundType]float64{"pvd": 400000, config.RMF: 50000}, 0); got != 50000 { // group binds
+		t.Errorf("group binds: %v", got)
+	}
+	if got := r.RemainingRoom("unknown", paid, 0); got != 0 {
+		t.Errorf("unknown: %v", got)
+	}
+	if !r.IsManual("pvd") || r.IsManual(config.RMF) || r.Label("pvd") != "PVD" || r.Label(config.RMF) != "RMF" {
+		t.Error("IsManual/Label")
 	}
 }

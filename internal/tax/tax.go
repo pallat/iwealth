@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -20,11 +21,22 @@ type Combined struct {
 	Types []config.FundType `yaml:"types"`
 }
 
+// Manual is a deduction the user reports by hand (provident fund, pension
+// insurance, ...) instead of buying it through a tracked fund.
+type Manual struct {
+	Key   config.FundType `yaml:"key"`
+	Label string          `yaml:"label"`
+}
+
 type Rules struct {
 	Year     int                         `yaml:"year"`
 	Brackets []Bracket                   `yaml:"brackets"`
 	Caps     map[config.FundType]float64 `yaml:"caps"`
+	// Pct is an optional per-item limit as a fraction of gross annual income
+	// (0.3 = 30%). It applies together with Caps; the lower one wins.
+	Pct      map[config.FundType]float64 `yaml:"pct"`
 	Combined Combined                    `yaml:"combined"`
+	Manual   []Manual                    `yaml:"manual"`
 }
 
 func LoadRules(path string) (*Rules, error) {
@@ -45,11 +57,50 @@ func LoadRules(path string) (*Rules, error) {
 	return &r, nil
 }
 
-func deductibleType(t config.FundType) bool {
+func fundDeductible(t config.FundType) bool {
 	return t == config.RMF || t == config.SSF || t == config.ThaiESG
 }
 
+// IsManual reports whether t is a user-reported deduction key.
+func (r *Rules) IsManual(t config.FundType) bool {
+	return slices.ContainsFunc(r.Manual, func(m Manual) bool { return m.Key == t })
+}
+
+func (r *Rules) deductibleType(t config.FundType) bool { return fundDeductible(t) || r.IsManual(t) }
+
+// Deductions lists every deduction key in fixed order: rmf, ssf, thaiesg, then
+// the manual keys in file order.
+func (r *Rules) Deductions() []config.FundType {
+	out := []config.FundType{config.RMF, config.SSF, config.ThaiESG}
+	for _, m := range r.Manual {
+		out = append(out, m.Key)
+	}
+	return out
+}
+
+// Label is the display name of a deduction key.
+func (r *Rules) Label(t config.FundType) string {
+	for _, m := range r.Manual {
+		if m.Key == t && m.Label != "" {
+			return m.Label
+		}
+	}
+	return strings.ToUpper(string(t))
+}
+
 func (r *Rules) validate() error {
+	seen := map[config.FundType]bool{}
+	for i, m := range r.Manual {
+		switch {
+		case m.Key == "" || m.Key != config.FundType(strings.ToLower(string(m.Key))) || strings.ContainsAny(string(m.Key), " \t"):
+			return fmt.Errorf("manual %d: key %q must be non-empty, lower-case, without spaces", i+1, m.Key)
+		case fundDeductible(m.Key) || m.Key == config.Ordinary:
+			return fmt.Errorf("manual %d: key %q is reserved for funds (record it with /paid)", i+1, m.Key)
+		case seen[m.Key]:
+			return fmt.Errorf("manual %d: duplicate key %q", i+1, m.Key)
+		}
+		seen[m.Key] = true
+	}
 	var prev float64
 	for i, b := range r.Brackets {
 		if b.Rate < 0 || b.Rate > 1 {
@@ -65,13 +116,21 @@ func (r *Rules) validate() error {
 		prev = b.UpTo
 	}
 	for t := range r.Caps {
-		if !deductibleType(t) {
-			return fmt.Errorf("caps: unknown fund type %q (use rmf, ssf or thaiesg, lower-case)", t)
+		if !r.deductibleType(t) {
+			return fmt.Errorf("caps: unknown fund type %q (use rmf, ssf, thaiesg or a manual key, lower-case)", t)
+		}
+	}
+	for t, p := range r.Pct {
+		if !r.deductibleType(t) {
+			return fmt.Errorf("pct: unknown fund type %q (use rmf, ssf, thaiesg or a manual key, lower-case)", t)
+		}
+		if p <= 0 || p > 1 {
+			return fmt.Errorf("pct: %q must be a fraction between 0 and 1 (0.3 = 30%%), got %v", t, p)
 		}
 	}
 	for _, t := range r.Combined.Types {
-		if !deductibleType(t) {
-			return fmt.Errorf("combined.types: unknown fund type %q (use rmf, ssf or thaiesg, lower-case)", t)
+		if !r.deductibleType(t) {
+			return fmt.Errorf("combined.types: unknown fund type %q (use rmf, ssf, thaiesg or a manual key, lower-case)", t)
 		}
 	}
 	return nil
@@ -104,19 +163,37 @@ func (r *Rules) TaxSaved(netIncome, extra float64) float64 {
 	return r.Tax(netIncome) - r.Tax(max(netIncome-extra, 0))
 }
 
-// RemainingRoom is how much more can be deducted for fund type t this year.
-func (r *Rules) RemainingRoom(t config.FundType, paid map[config.FundType]float64) float64 {
+// ItemCap is the yearly limit for t: its baht cap, lowered to its share of
+// grossIncome when a pct limit is set and grossIncome is known (> 0).
+func (r *Rules) ItemCap(t config.FundType, grossIncome float64) float64 {
 	cap, ok := r.Caps[t]
 	if !ok {
 		return 0
 	}
-	room := cap - paid[t]
+	if p, ok := r.Pct[t]; ok && grossIncome > 0 {
+		cap = min(cap, p*grossIncome)
+	}
+	return cap
+}
+
+// CombinedUsed is how much of the shared cap the recorded amounts take.
+func (r *Rules) CombinedUsed(paid map[config.FundType]float64) float64 {
+	var used float64
+	for _, ct := range r.Combined.Types {
+		used += paid[ct]
+	}
+	return used
+}
+
+// RemainingRoom is how much more can be deducted for deduction key t this year.
+// grossIncome (0 = unknown) enables the percentage-of-income limits.
+func (r *Rules) RemainingRoom(t config.FundType, paid map[config.FundType]float64, grossIncome float64) float64 {
+	if _, ok := r.Caps[t]; !ok {
+		return 0
+	}
+	room := r.ItemCap(t, grossIncome) - paid[t]
 	if slices.Contains(r.Combined.Types, t) {
-		var used float64
-		for _, ct := range r.Combined.Types {
-			used += paid[ct]
-		}
-		room = min(room, r.Combined.Cap-used)
+		room = min(room, r.Combined.Cap-r.CombinedUsed(paid))
 	}
 	return max(room, 0)
 }

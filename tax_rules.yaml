@@ -1,3 +1,5 @@
+# VERIFY every number below against the current Revenue Department rules before relying on it.
+# The figures come from news/blog summaries for tax year 2568 (2025), not from rd.go.th.
 year: 2026
 brackets:        # up_to: 0 means no upper limit
   - {up_to: 150000, rate: 0}
@@ -8,10 +10,36 @@ brackets:        # up_to: 0 means no upper limit
   - {up_to: 2000000, rate: 0.25}
   - {up_to: 5000000, rate: 0.30}
   - {up_to: 0, rate: 0.35}
+
+# Baht cap per deduction. rmf/ssf/thaiesg are tracked funds (record with /paid);
+# keys listed under "manual" are recorded by hand with /deduct <key> <year-to-date total>.
 caps:
   rmf: 500000
-  ssf: 200000   # SSF deduction rules changed: purchases are deductible only for certain years; verify with the Revenue Department before relying on this cap (set to 0 if not applicable)
+  ssf: 200000   # SSF deduction rules changed: purchases are deductible only for certain years; set to 0 if not applicable
   thaiesg: 300000
+  pvd: 500000          # provident fund (employee contribution)
+  gpf: 500000          # government pension fund (กบข.)
+  nsf: 500000          # national savings fund (กอช.)
+  teacher_fund: 500000 # private teacher fund
+  pension_ins: 200000  # pension life insurance
+
+# Optional limit as a fraction of GROSS annual income (0.3 = 30%). Needs ANNUAL_GROSS_INCOME in .env;
+# the lower of cap and pct x income applies. Without ANNUAL_GROSS_INCOME these are ignored.
+pct:
+  rmf: 0.30
+  ssf: 0.30
+  thaiesg: 0.30
+  pvd: 0.15
+  pension_ins: 0.15
+
+# Items that share one overall cap (thaiesg is NOT in it).
 combined:
   cap: 500000
-  types: [rmf, ssf]
+  types: [rmf, ssf, pvd, gpf, nsf, teacher_fund, pension_ins]
+
+manual:
+  - {key: pvd, label: "กองทุนสำรองเลี้ยงชีพ (PVD)"}
+  - {key: gpf, label: "กบข."}
+  - {key: nsf, label: "กอช."}
+  - {key: teacher_fund, label: "กองทุนครูเอกชน"}
+  - {key: pension_ins, label: "ประกันชีวิตบำนาญ"}

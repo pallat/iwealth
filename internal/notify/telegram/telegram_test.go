@@ -214,3 +214,18 @@ func TestPollReportsErrorsRateLimited(t *testing.T) {
 		}
 	}
 }
+
+func TestParseDeduct(t *testing.T) {
+	k, a, err := ParseDeduct("/deduct@MyBot PVD 60000")
+	if err != nil || k != "pvd" || a != 60000 {
+		t.Fatalf("%v %v %v", k, a, err)
+	}
+	if _, a, err := ParseDeduct("/deduct pvd 0"); err != nil || a != 0 {
+		t.Errorf("zero must be allowed: %v %v", a, err)
+	}
+	for _, in := range []string{"/deduct", "/deduct pvd", "/deduct pvd -1", "/deduct pvd x", "/deduct pvd NaN", "/paid pvd 5", "/deduct a b c"} {
+		if _, _, err := ParseDeduct(in); err == nil {
+			t.Errorf("%q should fail", in)
+		}
+	}
+}

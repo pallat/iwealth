@@ -17,6 +17,7 @@ const schema = `
 CREATE TABLE IF NOT EXISTS nav (fund TEXT NOT NULL, date TEXT NOT NULL, nav REAL NOT NULL, PRIMARY KEY (fund, date));
 CREATE TABLE IF NOT EXISTS alert_state (fund TEXT PRIMARY KEY, level REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS tax_paid (id INTEGER PRIMARY KEY AUTOINCREMENT, fund TEXT NOT NULL, type TEXT NOT NULL, amount REAL NOT NULL, paid_on TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS deduction_entry (year INTEGER NOT NULL, key TEXT NOT NULL, amount REAL NOT NULL, PRIMARY KEY (year, key));
 `
 
 func Open(path string) (*Store, error) {
@@ -107,6 +108,37 @@ func (s *Store) PaidByType(ctx context.Context, year int) (map[config.FundType]f
 			return nil, err
 		}
 		out[config.FundType(t)] = sum
+	}
+	return out, rows.Err()
+}
+
+// SetDeduction records the year-to-date total for a manually reported deduction
+// key, replacing any earlier value. amount 0 removes the entry.
+func (s *Store) SetDeduction(ctx context.Context, year int, key config.FundType, amount float64) error {
+	if amount == 0 {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM deduction_entry WHERE year=? AND key=?`, year, string(key))
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO deduction_entry(year,key,amount) VALUES(?,?,?)
+		ON CONFLICT(year,key) DO UPDATE SET amount=excluded.amount`, year, string(key), amount)
+	return err
+}
+
+// Deductions returns the manually reported totals for a year.
+func (s *Store) Deductions(ctx context.Context, year int) (map[config.FundType]float64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT key, amount FROM deduction_entry WHERE year=?`, year)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[config.FundType]float64{}
+	for rows.Next() {
+		var k string
+		var a float64
+		if err := rows.Scan(&k, &a); err != nil {
+			return nil, err
+		}
+		out[config.FundType(k)] = a
 	}
 	return out, rows.Err()
 }

@@ -29,6 +29,7 @@ type Config struct {
 	PeakWindowDays                        int
 	DropTriggers                          []float64
 	AnnualNetIncome                       float64
+	AnnualGrossIncome                     float64 // optional; enables %-of-income deduction limits
 	RunAt, RetryUntil                     string
 	RetryInterval                         time.Duration
 	ContextProviders                      []string
@@ -74,6 +75,11 @@ func Load(getenv func(string) string) (*Config, error) {
 	if v := getenv("ANNUAL_NET_INCOME"); v != "" {
 		if c.AnnualNetIncome, err = strconv.ParseFloat(v, 64); err != nil {
 			return nil, fmt.Errorf("ANNUAL_NET_INCOME: %w", err)
+		}
+	}
+	if v := getenv("ANNUAL_GROSS_INCOME"); v != "" {
+		if c.AnnualGrossIncome, err = strconv.ParseFloat(v, 64); err != nil || c.AnnualGrossIncome < 0 {
+			return nil, fmt.Errorf("ANNUAL_GROSS_INCOME must be a non-negative number")
 		}
 	}
 	if c.RetryInterval, err = time.ParseDuration(or(getenv("RETRY_INTERVAL"), "30m")); err != nil {
@@ -138,6 +144,9 @@ func parseFunds(s string) ([]Fund, error) {
 // funds need ANNUAL_NET_INCOME (net taxable income before fund deductions), otherwise
 // every tax estimate would silently be zero.
 func (c *Config) Validate() error {
+	if c.AnnualGrossIncome > 0 && c.AnnualNetIncome > c.AnnualGrossIncome {
+		return fmt.Errorf("ANNUAL_NET_INCOME must not exceed ANNUAL_GROSS_INCOME")
+	}
 	if c.AnnualNetIncome > 0 {
 		return nil
 	}

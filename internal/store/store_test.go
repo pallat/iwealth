@@ -60,3 +60,19 @@ func TestPaidByTypeYearScoped(t *testing.T) {
 		t.Fatalf("%v %v", m, err)
 	}
 }
+
+func TestDeductionsSetReplaceClear(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	s.SetDeduction(ctx, 2026, "pvd", 1000)
+	s.SetDeduction(ctx, 2026, "pvd", 2500)
+	s.SetDeduction(ctx, 2025, "pvd", 9999)
+	m, err := s.Deductions(ctx, 2026)
+	if err != nil || len(m) != 1 || m["pvd"] != 2500 {
+		t.Fatalf("%v %v", m, err)
+	}
+	s.SetDeduction(ctx, 2026, "pvd", 0)
+	if m, _ = s.Deductions(ctx, 2026); len(m) != 0 {
+		t.Fatalf("not cleared: %v", m)
+	}
+}

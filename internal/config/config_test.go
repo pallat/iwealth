@@ -70,3 +70,28 @@ func TestValidateTaxFundNeedsIncome(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestGrossIncome(t *testing.T) {
+	base := map[string]string{"SEC_API_KEY": "a", "DEEPSEEK_API_KEY": "b", "TELEGRAM_BOT_TOKEN": "c", "TELEGRAM_CHAT_ID": "1", "FUNDS": "X:rmf", "ANNUAL_NET_INCOME": "500000"}
+	load := func(extra map[string]string) (*Config, error) {
+		return Load(func(k string) string {
+			if v, ok := extra[k]; ok {
+				return v
+			}
+			return base[k]
+		})
+	}
+	c, err := load(map[string]string{"ANNUAL_GROSS_INCOME": "600000"})
+	if err != nil || c.AnnualGrossIncome != 600000 || c.Validate() != nil {
+		t.Fatalf("%+v %v", c, err)
+	}
+	if c, _ = load(nil); c.AnnualGrossIncome != 0 || c.Validate() != nil {
+		t.Error("gross is optional")
+	}
+	if _, err := load(map[string]string{"ANNUAL_GROSS_INCOME": "-1"}); err == nil {
+		t.Error("negative gross must fail")
+	}
+	if c, _ = load(map[string]string{"ANNUAL_GROSS_INCOME": "400000"}); c.Validate() == nil {
+		t.Error("net > gross must fail")
+	}
+}

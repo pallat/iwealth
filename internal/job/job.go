@@ -35,6 +35,8 @@ type Store interface {
 	SetLevel(ctx context.Context, fund string, level float64) error
 	AddPaid(ctx context.Context, fund string, t config.FundType, amount float64, on time.Time) error
 	PaidByType(ctx context.Context, year int) (map[config.FundType]float64, error)
+	SetDeduction(ctx context.Context, year int, key config.FundType, amount float64) error
+	Deductions(ctx context.Context, year int) (map[config.FundType]float64, error)
 }
 
 type Job struct {
@@ -246,6 +248,23 @@ func isTax(t config.FundType) bool {
 
 func label(t config.FundType) string { return strings.ToUpper(string(t)) }
 
+// allPaid merges fund purchases (/paid) with manually reported totals (/deduct)
+// into one amount per deduction key.
+func (j *Job) allPaid(ctx context.Context, year int) (map[config.FundType]float64, error) {
+	paid, err := j.Store.PaidByType(ctx, year)
+	if err != nil {
+		return nil, err
+	}
+	manual, err := j.Store.Deductions(ctx, year)
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range manual {
+		paid[k] += v
+	}
+	return paid, nil
+}
+
 // ---- ingest ----
 
 // backfillWeekdays is how many weekdays before the run date are re-checked for gaps.
@@ -436,11 +455,11 @@ func (j *Job) evaluate(ctx context.Context, f config.Fund, date time.Time, text 
 }
 
 func (j *Job) planLines(ctx context.Context, t config.FundType, year int) string {
-	paid, err := j.Store.PaidByType(ctx, year)
+	paid, err := j.allPaid(ctx, year)
 	if err != nil {
 		return "แผนลดหย่อน: คำนวณไม่ได้ (อ่านยอดซื้อไม่สำเร็จ)"
 	}
-	p, ok := plan.Build(j.Rules, j.Cfg.AnnualNetIncome, paid, t)
+	p, ok := plan.Build(j.Rules, j.Cfg.AnnualNetIncome, j.Cfg.AnnualGrossIncome, paid, t)
 	if !ok {
 		return fmt.Sprintf("ลดหย่อน %s: สิทธิ์เต็มแล้วในปี %d", label(t), year)
 	}
@@ -495,7 +514,7 @@ func (j *Job) RunDaily(ctx context.Context, date time.Time) error {
 
 // ---- commands ----
 
-const help = "คำสั่งที่ใช้ได้:\n/paid <กอง> <จำนวนเงิน> บันทึกยอดซื้อกองลดหย่อนภาษี\n/tax สรุปสิทธิ์ลดหย่อนปีนี้"
+const help = "คำสั่งที่ใช้ได้:\n/paid <กอง> <จำนวนเงิน> บันทึกยอดซื้อกองลดหย่อนภาษี\n/deduct <รายการ> <ยอดสะสมทั้งปี> บันทึกค่าลดหย่อนอื่น เช่น PVD, ประกันบำนาญ (0 = ลบ, /deduct เฉยๆ ดูรายการ)\n/tax สรุปสิทธิ์ลดหย่อนปีนี้"
 
 func commandName(text string) string {
 	f := strings.Fields(text)
@@ -514,6 +533,8 @@ func (j *Job) HandleCommand(ctx context.Context, text string) string {
 	switch commandName(text) {
 	case "/paid":
 		return j.paid(ctx, text)
+	case "/deduct":
+		return j.deduct(ctx, text)
 	case "/tax":
 		return j.taxSummary(ctx)
 	}
@@ -542,42 +563,114 @@ func (j *Job) paid(ctx context.Context, text string) string {
 	if err := j.Store.AddPaid(ctx, fund.Code, fund.Type, amount, on); err != nil {
 		return "บันทึกไม่สำเร็จ ลองใหม่อีกครั้ง"
 	}
-	paid, err := j.Store.PaidByType(ctx, on.Year())
+	paid, err := j.allPaid(ctx, on.Year())
 	if err != nil {
 		return fmt.Sprintf("บันทึก %s %s บาท แล้ว (อ่านยอดรวมไม่สำเร็จ)", fund.Code, amountStr(amount))
 	}
 	byType, _ := plan.SavedSoFar(j.Rules, j.Cfg.AnnualNetIncome, paid)
 	return fmt.Sprintf("บันทึก %s %s บาท แล้ว (บันทึกซ้ำจะนับเพิ่ม)\n%s ปี %d: ซื้อแล้ว %s | สิทธิ์คงเหลือ %s | ประหยัดภาษีโดยประมาณ %s บาท",
 		fund.Code, amountStr(amount), label(fund.Type), on.Year(),
-		money(paid[fund.Type]), money(j.Rules.RemainingRoom(fund.Type, paid)),
+		money(paid[fund.Type]), money(j.Rules.RemainingRoom(fund.Type, paid, j.Cfg.AnnualGrossIncome)),
 		money(byType[fund.Type]))
+}
+
+func (j *Job) deduct(ctx context.Context, text string) string {
+	year := bkkDate(j.now()).Year()
+	if len(strings.Fields(text)) == 1 {
+		return j.deductList(ctx, year)
+	}
+	key, amount, err := telegram.ParseDeduct(text)
+	if err != nil {
+		return "รูปแบบไม่ถูกต้อง ใช้: /deduct <รายการ> <ยอดสะสมทั้งปี> เช่น /deduct pvd 60000 (0 = ลบ) พิมพ์ /deduct เฉยๆ เพื่อดูรายการ"
+	}
+	k := config.FundType(key)
+	switch {
+	case isTax(k):
+		return fmt.Sprintf("%s ซื้อผ่านกองที่ติดตาม ใช้ /paid <กอง> <จำนวนเงิน> แทน", label(k))
+	case !j.Rules.IsManual(k):
+		return fmt.Sprintf("ไม่รู้จักรายการ %s ไม่ได้บันทึกอะไร\n%s", key, j.deductList(ctx, year))
+	}
+	if err := j.Store.SetDeduction(ctx, year, k, amount); err != nil {
+		return "บันทึกไม่สำเร็จ ลองใหม่อีกครั้ง"
+	}
+	verb := "ตั้งยอดสะสม"
+	if amount == 0 {
+		verb = "ลบยอด"
+	}
+	head := fmt.Sprintf("%s %s ปี %d: %s บาท แล้ว (ค่าเดิมถูกแทนที่)", verb, j.Rules.Label(k), year, amountStr(amount))
+	paid, err := j.allPaid(ctx, year)
+	if err != nil {
+		return head + " (อ่านยอดรวมไม่สำเร็จ)"
+	}
+	return head + "\n" + j.roomLines(paid, k)
+}
+
+// roomLines shows the used / cap / remaining line for t and, when t shares the
+// combined cap, the combined position.
+func (j *Job) roomLines(paid map[config.FundType]float64, t config.FundType) string {
+	gross := j.Cfg.AnnualGrossIncome
+	out := fmt.Sprintf("%s: ใช้แล้ว %s / เพดาน %s | คงเหลือ %s", j.Rules.Label(t),
+		money(paid[t]), money(j.Rules.ItemCap(t, gross)), money(j.Rules.RemainingRoom(t, paid, gross)))
+	if slices.Contains(j.Rules.Combined.Types, t) {
+		used := j.Rules.CombinedUsed(paid)
+		out += fmt.Sprintf("\nกลุ่มเพดานรวม: ใช้แล้ว %s / %s | คงเหลือ %s",
+			money(used), money(j.Rules.Combined.Cap), money(max(j.Rules.Combined.Cap-used, 0)))
+	}
+	return out
+}
+
+func (j *Job) deductList(ctx context.Context, year int) string {
+	manual, err := j.Store.Deductions(ctx, year)
+	if err != nil {
+		return "อ่านข้อมูลไม่สำเร็จ ลองใหม่อีกครั้ง"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "รายการที่บันทึกเองได้ (ยอดสะสมปี %d):\n", year)
+	for _, m := range j.Rules.Manual {
+		fmt.Fprintf(&b, "%s (%s): %s บาท\n", m.Key, m.Label, money(manual[m.Key]))
+	}
+	b.WriteString("ตัวอย่าง: /deduct pvd 60000 (ยอดสะสมทั้งปี ไม่ใช่ยอดที่เพิ่ม). RMF/SSF/Thai ESG ใช้ /paid")
+	return b.String()
 }
 
 func (j *Job) taxSummary(ctx context.Context) string {
 	year := bkkDate(j.now()).Year()
-	paid, err := j.Store.PaidByType(ctx, year)
+	paid, err := j.allPaid(ctx, year)
 	if err != nil {
 		return "อ่านข้อมูลไม่สำเร็จ ลองใหม่อีกครั้ง"
 	}
 	seen := map[config.FundType]bool{}
-	var types []config.FundType
+	var keys []config.FundType
 	for _, f := range j.Cfg.Funds {
 		if isTax(f.Type) && !seen[f.Type] {
 			seen[f.Type] = true
-			types = append(types, f.Type)
+			keys = append(keys, f.Type)
 		}
 	}
-	if len(types) == 0 {
-		return "ไม่มีกองลดหย่อนภาษีในรายการที่ติดตาม"
+	for _, m := range j.Rules.Manual {
+		if paid[m.Key] > 0 {
+			keys = append(keys, m.Key)
+		}
 	}
+	if len(keys) == 0 {
+		return "ไม่มีกองลดหย่อนภาษีในรายการที่ติดตาม และยังไม่มียอดที่บันทึกเอง"
+	}
+	gross := j.Cfg.AnnualGrossIncome
 	var b strings.Builder
 	fmt.Fprintf(&b, "สรุปสิทธิ์ลดหย่อนปี %d\n", year)
 	byType, total := plan.SavedSoFar(j.Rules, j.Cfg.AnnualNetIncome, paid)
-	for _, t := range types {
-		fmt.Fprintf(&b, "%s: ซื้อแล้ว %s / เพดาน %s | คงเหลือ %s | ประหยัดภาษีโดยประมาณ %s บาท\n",
-			label(t), money(paid[t]), money(j.Rules.Caps[t]), money(j.Rules.RemainingRoom(t, paid)),
-			money(byType[t]))
+	for _, t := range keys {
+		fmt.Fprintf(&b, "%s: ใช้แล้ว %s / เพดาน %s | คงเหลือ %s | ประหยัดภาษีโดยประมาณ %s บาท\n",
+			j.Rules.Label(t), money(paid[t]), money(j.Rules.ItemCap(t, gross)),
+			money(j.Rules.RemainingRoom(t, paid, gross)), money(byType[t]))
 	}
-	fmt.Fprintf(&b, "รวมประหยัดภาษีโดยประมาณ %s บาท (แยกตามลำดับ RMF, SSF, Thai ESG)", money(total))
+	if used := j.Rules.CombinedUsed(paid); len(j.Rules.Combined.Types) > 0 {
+		fmt.Fprintf(&b, "กลุ่มเพดานรวม: ใช้แล้ว %s / %s | คงเหลือ %s\n",
+			money(used), money(j.Rules.Combined.Cap), money(max(j.Rules.Combined.Cap-used, 0)))
+	}
+	if gross <= 0 {
+		b.WriteString("หมายเหตุ: ยังไม่ได้ตั้ง ANNUAL_GROSS_INCOME จึงยังไม่คิดเพดาน % ของรายได้\n")
+	}
+	fmt.Fprintf(&b, "รวมประหยัดภาษีโดยประมาณ %s บาท", money(total))
 	return b.String()
 }

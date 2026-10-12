@@ -29,7 +29,8 @@ Edit `.env`. The main keys:
 | Key | Meaning |
 | --- | --- |
 | `FUNDS` | Your funds as `CODE:type`, separated by commas. Type is `rmf`, `ssf`, `thaiesg` or `ordinary`. Example: `EXAMPLE-RMF:rmf,EXAMPLE-FUND:ordinary` |
-| `ANNUAL_NET_INCOME` | Your yearly net taxable income in baht **before** RMF, SSF and Thai ESG deductions. Purchases you record with `/paid` are subtracted from it for the estimate. Required if any fund is a tax fund. |
+| `ANNUAL_NET_INCOME` | Your yearly net taxable income in baht **before** every deduction iwealth tracks: RMF, SSF, Thai ESG and the `/deduct` items (PVD, pension insurance, ...). Other deductions (family, life insurance, ...) should already be taken out. What you record with `/paid` and `/deduct` is subtracted from it for the estimate. Required if any fund is a tax fund. |
+| `ANNUAL_GROSS_INCOME` | Optional. Your yearly gross income before any deduction. Turns on the percentage-of-income limits (`pct:` in `tax_rules.yaml`, for example RMF 30%). Without it only the baht caps apply, and `/tax` says so. |
 | `RUN_AT` / `RETRY_UNTIL` / `RETRY_INTERVAL` | Daily run time (default `20:00`), last retry time (`23:30`), and gap between retries (`30m`). Times are Asia/Bangkok. |
 | `DROP_TRIGGERS` | Alert levels in percent (default `5,10,15`). |
 | `PEAK_WINDOW_DAYS` | Trading days used to find the peak (default `252`). |
@@ -43,12 +44,13 @@ Other keys are described in `.env.example`. Leave an optional key empty to turn 
 
 `tax_rules.yaml` holds the tax brackets and the RMF, SSF and Thai ESG caps. **The values in this file are placeholders.** Check them against the current Revenue Department rules every year, and update the file before the new tax year.
 
-The file does not model the income-percentage limits on RMF and SSF. The tax estimate uses fixed caps only, so it can be too high for some people.
+Items that share the overall retirement cap (RMF, SSF, provident fund, GPF, national savings fund, teacher fund, pension insurance) are listed under `combined:`. Thai ESG is outside it. Percentage-of-income limits live under `pct:` and need `ANNUAL_GROSS_INCOME`. All numbers come from news summaries, so check them against the Revenue Department before relying on them.
 
 ## Telegram commands
 
 - `/paid <fund> <amount>`: record a purchase of a tax-deductible fund. Example: `/paid EXAMPLE-RMF 10000`.
-- `/tax`: show this year's deduction total and the estimated tax saved.
+- `/deduct <key> <year-to-date total>`: record a deduction you do not buy through a tracked fund (keys: `pvd`, `gpf`, `nsf`, `teacher_fund`, `pension_ins`). The amount **replaces** the previous value, so send the running total for the year; `0` removes it. Example: `/deduct pvd 60000`. Plain `/deduct` lists the keys. RMF, SSF and Thai ESG use `/paid`.
+- `/tax`: show this year's used, cap and remaining room per item, the shared-cap position, and the estimated tax saved.
 
 ## Privacy
 
