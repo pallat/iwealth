@@ -3,6 +3,7 @@ module github.com/pallat/iwealth
 go 1.27
 
 require (
+	github.com/joho/godotenv v1.5.1
 	google.golang.org/adk/v2 v2.5.0
 	google.golang.org/genai v1.71.0
 	gopkg.in/yaml.v3 v3.0.1
