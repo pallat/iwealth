@@ -645,7 +645,7 @@ func (j *Job) yearEndMessage(ctx context.Context, d time.Time) string {
 
 // ---- commands ----
 
-const help = "คำสั่งที่ใช้ได้:\n/paid <กอง> <จำนวนเงิน> บันทึกยอดซื้อกองลดหย่อนภาษี\n/deduct <รายการ> <ยอดสะสมทั้งปี> บันทึกค่าลดหย่อนอื่น เช่น PVD, ประกันบำนาญ (0 = ลบ, /deduct เฉยๆ ดูรายการ)\n/tax สรุปสิทธิ์ลดหย่อนปีนี้\n/report [ปี] รายงานรายการที่บันทึกไว้ทั้งหมด"
+const help = "คำสั่งที่ใช้ได้:\n/paid <กอง> <จำนวนเงิน> บันทึกยอดซื้อกองลดหย่อนภาษี\n/deduct <รายการ> <ยอดสะสมทั้งปี> บันทึกค่าลดหย่อนอื่น เช่น PVD, ประกันบำนาญ (0 = ลบ, /deduct เฉยๆ ดูรายการ)\n/tax สรุปภาษีและสิทธิ์ลดหย่อนปีนี้\n/room สิทธิ์ลดหย่อนที่ใช้ได้อีกทั้งหมด\n/guide [คำค้น] วิธีบันทึกค่าลดหย่อนแต่ละรายการ เช่น /guide ประกัน\n/report [ปี] รายงานรายการที่บันทึกไว้ทั้งหมด"
 
 func commandName(text string) string {
 	f := strings.Fields(text)
@@ -666,6 +666,10 @@ func (j *Job) HandleCommand(ctx context.Context, text string) string {
 		return j.paid(ctx, text)
 	case "/deduct":
 		return j.deduct(ctx, text)
+	case "/room":
+		return j.room(ctx)
+	case "/guide":
+		return j.guide(text)
 	case "/report":
 		return j.report(ctx, text)
 	case "/tax":
@@ -744,7 +748,7 @@ func (j *Job) deduct(ctx context.Context, text string) string {
 // group with a shared cap, the group position.
 func (j *Job) roomLines(paid map[config.FundType]float64, t config.FundType) string {
 	gross := j.Cfg.AnnualGrossIncome
-	out := fmt.Sprintf("%s: ใช้แล้ว %s / เพดาน %s | คงเหลือ %s%s", j.Rules.Label(t),
+	out := fmt.Sprintf("%s: ใช้แล้ว %s / เพดาน %s | คงเหลือ %s%s", j.itemName(t),
 		money(paid[t]), money(j.Rules.ItemCap(t, gross)), money(j.Rules.RemainingRoom(t, paid, gross)), j.overNote(paid, t))
 	if g := j.Rules.GroupOf(t); g != nil {
 		out += "\n" + j.groupLine(*g, paid)
@@ -834,12 +838,142 @@ func (j *Job) deductList(ctx context.Context, year int) string {
 		}
 		fmt.Fprintf(&b, "%s (%s): %s บาท | %s\n", m.Key, m.Label, money(manual[m.Key]), capTxt)
 	}
-	b.WriteString("ตัวอย่าง: /deduct pvd 60000 (ยอดสะสมทั้งปี ไม่ใช่ยอดที่เพิ่ม). RMF/SSF/Thai ESG ใช้ /paid")
+	b.WriteString("ตัวอย่าง: /deduct pvd 60000 (ยอดสะสมทั้งปี ไม่ใช่ยอดที่เพิ่ม). RMF/SSF/Thai ESG ใช้ /paid\nรายละเอียดแต่ละรายการ: /guide")
 	return b.String()
 }
 
 func (j *Job) taxSummary(ctx context.Context) string {
 	return j.summaryFor(ctx, bkkDate(j.now()).Year())
+}
+
+// itemName is how a deduction is shown in reports: the label plus, for ones you
+// record with /deduct, the key to type.
+func (j *Job) itemName(t config.FundType) string {
+	if j.Rules.IsManual(t) && !j.Rules.IsAuto(t) {
+		return fmt.Sprintf("%s [%s]", j.Rules.Label(t), t)
+	}
+	return j.Rules.Label(t)
+}
+
+// opportunities renders the "can still deduct" sections for the keys keep accepts:
+// first what can be bought, then what applies only if you qualify. "" when empty.
+func (j *Job) opportunities(inc tax.Income, paid map[config.FundType]float64, keep func(config.FundType) bool, title string) string {
+	var buy, other []plan.Opportunity
+	for _, o := range plan.Opportunities(j.Rules, inc, paid) {
+		switch {
+		case !keep(o.Key):
+		case o.Invest:
+			buy = append(buy, o)
+		default:
+			other = append(other, o)
+		}
+	}
+	line := func(o plan.Opportunity) string {
+		note := ""
+		if g := j.Rules.GroupOf(o.Key); g != nil {
+			note = " (ใช้ร่วมกลุ่ม" + g.Label + ")"
+		}
+		return fmt.Sprintf("%s: ได้อีก %s → ประหยัดภาษีสูงสุด %s บาท%s\n", j.itemName(o.Key), money(o.Room), money(o.TaxSaved), note)
+	}
+	var b strings.Builder
+	if len(buy) > 0 {
+		b.WriteString(title + " (ซื้อเพิ่มได้)\n")
+		for _, o := range buy {
+			b.WriteString(line(o))
+		}
+	}
+	if len(other) > 0 {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(title + " (ถ้าเข้าเกณฑ์)\n")
+		for _, o := range other {
+			b.WriteString(line(o))
+		}
+	}
+	if b.Len() > 0 {
+		b.WriteString("รายการในกลุ่มเดียวกันใช้เพดานร่วมกัน ภาษีที่ประหยัดของแต่ละบรรทัดรวมกันไม่ได้\n")
+	}
+	return b.String()
+}
+
+// room serves /room: every deduction that still has room, including the ones /tax leaves out.
+func (j *Job) room(ctx context.Context) string {
+	year := bkkDate(j.now()).Year()
+	paid, err := j.allPaid(ctx, year)
+	if err != nil {
+		return "อ่านข้อมูลไม่สำเร็จ ลองใหม่อีกครั้ง"
+	}
+	out := j.opportunities(j.income(), paid, func(config.FundType) bool { return true }, "สิทธิ์ลดหย่อนที่ใช้ได้อีกปี "+strconv.Itoa(year))
+	if out == "" {
+		return "ไม่มีสิทธิ์ลดหย่อนเหลือ (หรือยังไม่ได้ตั้งรายได้)"
+	}
+	return out + "วิธีบันทึก: /guide"
+}
+
+// guide serves /guide [term]: how to record each deduction, in the same words the
+// reports use. A term filters by key or label.
+func (j *Job) guide(text string) string {
+	f := strings.Fields(text)
+	term := ""
+	if len(f) > 1 {
+		term = strings.ToLower(strings.Join(f[1:], " "))
+	}
+	match := func(key config.FundType, label string) bool {
+		return term == "" || strings.Contains(strings.ToLower(string(key)), term) || strings.Contains(strings.ToLower(label), term)
+	}
+	gross := j.Cfg.AnnualGrossIncome
+	example := func(key config.FundType) string {
+		if h := j.Rules.Hint(key); h != "" {
+			return h
+		}
+		amt := 10000.0
+		if c := j.Rules.ItemCap(key, gross); c > 0 {
+			amt = float64(int64(c/2/1000)) * 1000
+		}
+		return fmt.Sprintf("เช่น /deduct %s %s", key, money(amt))
+	}
+	var b strings.Builder
+	if term == "" {
+		b.WriteString("คู่มือบันทึกค่าลดหย่อน\n")
+		b.WriteString("• /paid <รหัสกอง> <จำนวนเงิน> สำหรับ RMF/SSF/Thai ESG (บวกเพิ่มทุกครั้ง)")
+		var codes []string
+		for _, fd := range j.Cfg.Funds {
+			if isTax(fd.Type) {
+				codes = append(codes, fd.Code)
+			}
+		}
+		if len(codes) > 0 {
+			b.WriteString(" กองของคุณ: " + strings.Join(codes, ", "))
+		}
+		b.WriteString("\n• /deduct <key> <ยอดสะสมทั้งปี> สำหรับรายการอื่น (ตั้งค่าแทนที่ ไม่ใช่บวกเพิ่ม, 0 = ลบ)\n")
+		b.WriteString("• ค้นหา: /guide ประกัน หรือ /guide pvd | ดูยอดที่บันทึก: /deduct, /report\n\nรายการ [key]\n")
+	}
+	n := 0
+	for _, m := range j.Rules.Manual {
+		if m.Auto || !match(m.Key, m.Label) {
+			continue
+		}
+		n++
+		capTxt := "ไม่กำหนดเพดาน"
+		if c := j.Rules.ItemCap(m.Key, gross); c > 0 {
+			capTxt = "เพดาน " + money(c)
+		}
+		if g := j.Rules.GroupOf(m.Key); g != nil {
+			capTxt += ", ร่วมกลุ่ม" + g.Label
+		}
+		fmt.Fprintf(&b, "%s [%s] %s\n  %s\n", m.Label, m.Key, capTxt, example(m.Key))
+	}
+	for _, t := range []config.FundType{config.RMF, config.SSF, config.ThaiESG} {
+		if match(t, strings.ToUpper(string(t))) {
+			n++
+			fmt.Fprintf(&b, "%s: ใช้ /paid <รหัสกอง> <จำนวนเงิน>\n", j.Rules.Label(t))
+		}
+	}
+	if n == 0 {
+		return fmt.Sprintf("ไม่พบรายการที่ตรงกับ %q ลอง /guide เฉยๆ เพื่อดูทั้งหมด", term)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func rate(r float64) string { return strings.TrimSuffix(fmt.Sprintf("%.1f", r*100), ".0") + "%" }
@@ -908,10 +1042,10 @@ func (j *Job) summaryFor(ctx context.Context, year int) string {
 		case j.Rules.IsAuto(t):
 			fmt.Fprintf(&b, "%s: %s (หักอัตโนมัติ) | ประหยัดภาษีโดยประมาณ %s บาท\n", j.Rules.Label(t), money(ded[t]), money(byType[t]))
 		case j.Rules.Caps[t] == 0:
-			fmt.Fprintf(&b, "%s: ใช้แล้ว %s (ไม่กำหนดเพดาน) | ประหยัดภาษีโดยประมาณ %s บาท\n", j.Rules.Label(t), money(paid[t]), money(byType[t]))
+			fmt.Fprintf(&b, "%s: ใช้แล้ว %s (ไม่กำหนดเพดาน) | ประหยัดภาษีโดยประมาณ %s บาท\n", j.itemName(t), money(paid[t]), money(byType[t]))
 		default:
 			fmt.Fprintf(&b, "%s: ใช้แล้ว %s / เพดาน %s | คงเหลือ %s | ประหยัดภาษีโดยประมาณ %s บาท%s\n",
-				j.Rules.Label(t), money(paid[t]), money(j.Rules.ItemCap(t, gross)),
+				j.itemName(t), money(paid[t]), money(j.Rules.ItemCap(t, gross)),
 				money(j.Rules.RemainingRoom(t, paid, gross)), money(byType[t]), j.overNote(paid, t))
 		}
 	}
@@ -923,35 +1057,9 @@ func (j *Job) summaryFor(ctx context.Context, year int) string {
 	}
 	fmt.Fprintf(&b, "รวมประหยัดภาษีโดยประมาณ %s บาท\n", money(total))
 
-	var buy, other []plan.Opportunity
-	for _, o := range plan.Opportunities(j.Rules, inc, paid) {
-		if o.Invest {
-			buy = append(buy, o)
-		} else {
-			other = append(other, o)
-		}
-	}
-	oppLine := func(o plan.Opportunity) string {
-		note := ""
-		if g := j.Rules.GroupOf(o.Key); g != nil {
-			note = " (ใช้ร่วมกลุ่ม" + g.Label + ")"
-		}
-		return fmt.Sprintf("%s: ได้อีก %s → ประหยัดภาษีสูงสุด %s บาท%s\n", j.Rules.Label(o.Key), money(o.Room), money(o.TaxSaved), note)
-	}
-	if len(buy) > 0 {
-		b.WriteString("\nใช้สิทธิ์ได้อีก (ซื้อเพิ่มได้)\n")
-		for _, o := range buy {
-			b.WriteString(oppLine(o))
-		}
-	}
-	if len(other) > 0 {
-		b.WriteString("\nใช้สิทธิ์ได้อีก (ถ้าเข้าเกณฑ์)\n")
-		for _, o := range other {
-			b.WriteString(oppLine(o))
-		}
-	}
-	if len(buy)+len(other) > 0 {
-		b.WriteString("รายการในกลุ่มเดียวกันใช้เพดานร่วมกัน ภาษีที่ประหยัดของแต่ละบรรทัดรวมกันไม่ได้\n")
+	if opp := j.opportunities(inc, paid, j.Rules.InSummary, "ใช้สิทธิ์ได้อีก"); opp != "" {
+		b.WriteString("\n" + opp)
+		b.WriteString("สิทธิ์อื่นที่ใช้ได้อีก: พิมพ์ /room | วิธีบันทึก: /guide\n")
 	}
 	if gross <= 0 {
 		b.WriteString("หมายเหตุ: ยังไม่ได้ตั้ง ANNUAL_GROSS_INCOME จึงไม่คิดค่าใช้จ่ายและเพดาน % ของรายได้\n")

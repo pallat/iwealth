@@ -1039,10 +1039,23 @@ func TestTaxSummaryFromGrossIncome(t *testing.T) {
 		"เงินได้สุทธิ 831,000", "ขั้นภาษี 20%", "750,001 – 1,000,000",
 		"เงินได้สุทธิเกิน 1,000,000 จะขึ้นขั้น 25%", "ลดหย่อนเพิ่ม 81,000 จะลงเป็นขั้น 15%",
 		"ลดหย่อนส่วนตัว: 60,000 (หักอัตโนมัติ)", "RMF: ใช้แล้ว 100,000",
-		"ใช้สิทธิ์ได้อีก (ซื้อเพิ่มได้)", "ใช้สิทธิ์ได้อีก (ถ้าเข้าเกณฑ์)", "คู่สมรส: ได้อีก 60,000",
+		"ใช้สิทธิ์ได้อีก (ซื้อเพิ่มได้)", "RMF: ได้อีก 260,000", "THAIESG: ได้อีก", "ประกันชีวิตบำนาญ [pension_ins]: ได้อีก",
+		"/room", "/guide",
 	} {
 		if !strings.Contains(r, w) {
 			t.Errorf("/tax missing %q:\n%s", w, r)
+		}
+	}
+	// /tax advertises only RMF/Thai ESG and insurance; everything else is behind /room
+	for _, no := range []string{"(ถ้าเข้าเกณฑ์)", "คู่สมรส [spouse]: ได้อีก", "SSF: ได้อีก", "กอช.", "ดอกเบี้ยบ้าน [home_loan]: ได้อีก"} {
+		if strings.Contains(r, no) {
+			t.Errorf("/tax must not advertise %q:\n%s", no, r)
+		}
+	}
+	room := e.j.HandleCommand(ctx, "/room")
+	for _, w := range []string{"(ถ้าเข้าเกณฑ์)", "คู่สมรส [spouse]: ได้อีก 60,000", "SSF: ได้อีก 200,000", "กอช. [nsf]", "ดอกเบี้ยบ้าน [home_loan]", "RMF: ได้อีก 260,000", "/guide"} {
+		if !strings.Contains(room, w) {
+			t.Errorf("/room missing %q:\n%s", w, room)
 		}
 	}
 	// life+health group is full (125k recorded, 100k counted) -> not offered again
@@ -1077,4 +1090,58 @@ func loadShipped(t *testing.T) *tax.Rules {
 		t.Fatal(err)
 	}
 	return r
+}
+
+func TestGuideCommand(t *testing.T) {
+	e := setup(t, config.Fund{Code: "ABC-RMF", Type: config.RMF}, config.Fund{Code: "ORD", Type: config.Ordinary})
+	ctx := context.Background()
+	e.j.Rules = loadShipped(t)
+	e.j.Cfg.AnnualGrossIncome = 1200000
+
+	all := e.j.HandleCommand(ctx, "/guide")
+	for _, w := range []string{"/paid", "ABC-RMF", "/deduct <key>", "ประกันชีวิตบำนาญ [pension_ins]", "/deduct pvd", "บุตร [child]", "/deduct child 90000", "เพดาน 100,000", "ร่วมกลุ่มเกษียณ"} {
+		if !strings.Contains(all, w) {
+			t.Errorf("/guide missing %q:\n%s", w, all)
+		}
+	}
+	if strings.Contains(all, "ORD") || strings.Contains(all, "personal") {
+		t.Errorf("/guide must skip ordinary funds and auto items:\n%s", all)
+	}
+	// every key in the guide is a key /deduct accepts
+	for _, m := range e.j.Rules.Manual {
+		if m.Auto {
+			continue
+		}
+		if !strings.Contains(all, "["+string(m.Key)+"]") {
+			t.Errorf("guide lacks key %s", m.Key)
+		}
+	}
+	// search by Thai word, by key, case-insensitively
+	ins := e.j.HandleCommand(ctx, "/guide ประกัน")
+	for _, w := range []string{"[life_ins]", "[health_ins]", "[pension_ins]", "[social_security]"} {
+		if !strings.Contains(ins, w) {
+			t.Errorf("/guide ประกัน missing %s:\n%s", w, ins)
+		}
+	}
+	if strings.Contains(ins, "[spouse]") {
+		t.Errorf("/guide ประกัน must filter:\n%s", ins)
+	}
+	if r := e.j.HandleCommand(ctx, "/guide PVD"); !strings.Contains(r, "[pvd]") || strings.Contains(r, "[gpf]") {
+		t.Errorf("/guide PVD: %s", r)
+	}
+	if r := e.j.HandleCommand(ctx, "/guide rmf"); !strings.Contains(r, "RMF: ใช้ /paid") {
+		t.Errorf("/guide rmf: %s", r)
+	}
+	if r := e.j.HandleCommand(ctx, "/guide zzz"); !strings.Contains(r, "ไม่พบ") {
+		t.Errorf("/guide zzz: %s", r)
+	}
+	// the example commands in the guide really record
+	ctxd := context.Background()
+	e.now = day(10, 12).Add(10 * time.Hour)
+	if r := e.j.HandleCommand(ctxd, "/deduct pension_ins 100000"); !strings.Contains(r, "ตั้งยอดสะสม") {
+		t.Errorf("guide example rejected: %s", r)
+	}
+	if h := e.j.HandleCommand(ctx, "hello"); !strings.Contains(h, "/guide") || !strings.Contains(h, "/room") {
+		t.Errorf("help: %s", h)
+	}
 }

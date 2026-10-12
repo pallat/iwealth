@@ -103,8 +103,31 @@ func TestLoadRulesValidation(t *testing.T) {
 }
 
 func TestShippedRulesLoad(t *testing.T) {
-	if _, err := LoadRules("../../tax_rules.yaml"); err != nil {
+	r, err := LoadRules("../../tax_rules.yaml")
+	if err != nil {
 		t.Fatal(err)
+	}
+	for _, m := range r.Manual {
+		if m.Auto {
+			continue
+		}
+		if !strings.Contains(m.Hint, "/deduct "+string(m.Key)+" ") {
+			t.Errorf("%s: hint must show a /deduct example with its own key: %q", m.Key, m.Hint)
+		}
+	}
+	if len(r.Summary) == 0 || !r.InSummary(config.RMF) || r.InSummary("home_loan") {
+		t.Errorf("summary = %v", r.Summary)
+	}
+}
+
+func TestSummaryValidation(t *testing.T) {
+	const ok = "brackets:\n  - {up_to: 0, rate: 0.1}\n"
+	if _, err := LoadRules(writeRules(t, ok+"summary: [nope]\n")); err == nil || !strings.Contains(err.Error(), "nope") {
+		t.Errorf("err=%v", err)
+	}
+	r, err := LoadRules(writeRules(t, ok))
+	if err != nil || !r.InSummary("anything") {
+		t.Errorf("empty summary must mean all: %v", err)
 	}
 }
 

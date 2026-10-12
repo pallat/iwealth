@@ -33,6 +33,7 @@ type Manual struct {
 	Label string          `yaml:"label"`
 	Kind  string          `yaml:"kind"`
 	Auto  bool            `yaml:"auto"`
+	Hint  string          `yaml:"hint"` // what to enter with /deduct, shown by /guide
 }
 
 // Expense is the standard expense deduction for salary income.
@@ -51,6 +52,9 @@ type Rules struct {
 	Groups  []Group                     `yaml:"groups"`
 	Manual  []Manual                    `yaml:"manual"`
 	Expense Expense                     `yaml:"expense"`
+	// Summary lists the keys whose remaining room /tax advertises; /room shows the
+	// rest. Empty means all of them.
+	Summary []config.FundType `yaml:"summary"`
 }
 
 func LoadRules(path string) (*Rules, error) {
@@ -117,6 +121,21 @@ func (r *Rules) auto(t config.FundType) bool {
 // IsAuto reports whether t is applied automatically (no /deduct entry needed).
 func (r *Rules) IsAuto(t config.FundType) bool { return r.auto(t) }
 
+// InSummary reports whether /tax should advertise the remaining room of t.
+func (r *Rules) InSummary(t config.FundType) bool {
+	return len(r.Summary) == 0 || slices.Contains(r.Summary, t)
+}
+
+// Hint is the /deduct guidance for a manual key ("" when none).
+func (r *Rules) Hint(t config.FundType) string {
+	for _, m := range r.Manual {
+		if m.Key == t {
+			return m.Hint
+		}
+	}
+	return ""
+}
+
 // GroupOf returns the group t belongs to, or nil.
 func (r *Rules) GroupOf(t config.FundType) *Group {
 	for i := range r.Groups {
@@ -154,6 +173,11 @@ func (r *Rules) validate() error {
 		}
 		if m.Auto && r.Caps[m.Key] <= 0 {
 			return fmt.Errorf("manual %d (%s): auto items need a positive cap", i+1, m.Key)
+		}
+	}
+	for _, t := range r.Summary {
+		if !r.deductibleType(t) {
+			return fmt.Errorf("summary: unknown fund type %q (use rmf, ssf, thaiesg or a manual key, lower-case)", t)
 		}
 	}
 	if r.Expense.Pct < 0 || r.Expense.Pct > 1 || r.Expense.Max < 0 {

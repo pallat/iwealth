@@ -53,26 +53,30 @@ groups:
   - {name: retirement, label: "เกษียณ", cap: 500000, types: [rmf, ssf, pvd, gpf, nsf, teacher_fund, pension_ins]}
   - {name: life_health, label: "ประกันชีวิต+สุขภาพ", cap: 100000, types: [life_ins, health_ins]}
 
+# /tax advertises the remaining room of these only; /room lists every item. Empty = all.
+summary: [rmf, thaiesg, pension_ins, life_ins, health_ins, parents_health]
+
 # kind: invest = you can still buy more of it; anything else depends on your circumstances.
 # auto: true = applied at its cap with no entry needed (personal allowance).
+# hint: the line /guide prints under the item; say what number to enter.
 manual:
   - {key: personal, label: "ลดหย่อนส่วนตัว", auto: true}
-  - {key: spouse, label: "คู่สมรส"}
-  - {key: child, label: "บุตร (ยอดรวมที่ใช้สิทธิ์)"}
-  - {key: parent_support, label: "อุปการะบิดามารดา"}
-  - {key: disabled, label: "อุปการะผู้พิการ (ยอดรวม)"}
-  - {key: pregnancy, label: "ฝากครรภ์/คลอดบุตร"}
-  - {key: pvd, label: "กองทุนสำรองเลี้ยงชีพ (PVD)"}
-  - {key: gpf, label: "กบข."}
-  - {key: nsf, label: "กอช.", kind: invest}
-  - {key: teacher_fund, label: "กองทุนครูเอกชน"}
-  - {key: pension_ins, label: "ประกันชีวิตบำนาญ", kind: invest}
-  - {key: life_ins, label: "ประกันชีวิต", kind: invest}
-  - {key: health_ins, label: "ประกันสุขภาพ", kind: invest}
-  - {key: parents_health, label: "ประกันสุขภาพบิดามารดา", kind: invest}
-  - {key: social_security, label: "ประกันสังคม"}
-  - {key: home_loan, label: "ดอกเบี้ยบ้าน"}
-  - {key: donation, label: "เงินบริจาค (ยอดที่นับได้)"}
-  - {key: easy_ereceipt, label: "Easy E-Receipt"}
-  - {key: travel, label: "ท่องเที่ยว"}
-  - {key: new_home, label: "สร้างบ้านใหม่"}
+  - {key: spouse, label: "คู่สมรส", hint: "ใส่ 60000 ถ้าคู่สมรสไม่มีเงินได้: /deduct spouse 60000"}
+  - {key: child, label: "บุตร", hint: "ใส่ยอดรวมทุกคน (คนแรก 30000, คนที่ 2 ขึ้นไปที่เกิดปี 2561 ขึ้นไป 60000): 2 คน = /deduct child 90000"}
+  - {key: parent_support, label: "อุปการะบิดามารดา", hint: "30000 ต่อคน (อายุ 60+ รายได้น้อย): 2 คน = /deduct parent_support 60000"}
+  - {key: disabled, label: "อุปการะผู้พิการ", hint: "60000 ต่อคน ใส่ยอดรวม: 1 คน = /deduct disabled 60000"}
+  - {key: pregnancy, label: "ฝากครรภ์/คลอดบุตร", hint: "ค่าใช้จ่ายจริง ไม่เกิน 60000 ต่อครรภ์: /deduct pregnancy 45000"}
+  - {key: pvd, label: "กองทุนสำรองเลี้ยงชีพ", hint: "เงินสะสมที่คุณจ่ายตั้งแต่ม.ค. จนถึงตอนนี้ (นายจ้างสมทบไม่นับ): หักเดือนละ 5000 ผ่านไป 3 เดือน = /deduct pvd 15000"}
+  - {key: gpf, label: "กบข.", hint: "เงินสะสมที่คุณจ่ายตั้งแต่ม.ค.: /deduct gpf 30000"}
+  - {key: nsf, label: "กอช.", kind: invest, hint: "เงินสะสมที่คุณจ่ายตั้งแต่ม.ค.: /deduct nsf 13200"}
+  - {key: teacher_fund, label: "กองทุนครูเอกชน", hint: "เงินสะสมที่คุณจ่ายตั้งแต่ม.ค.: /deduct teacher_fund 30000"}
+  - {key: pension_ins, label: "ประกันชีวิตบำนาญ", kind: invest, hint: "เบี้ยประกันบำนาญที่จ่ายจริงทั้งปี: /deduct pension_ins 100000"}
+  - {key: life_ins, label: "ประกันชีวิต", kind: invest, hint: "เบี้ยประกันชีวิต/สะสมทรัพย์ (10 ปีขึ้นไป) ที่จ่ายจริง ไม่รวมบำนาญและสุขภาพ: /deduct life_ins 50000"}
+  - {key: health_ins, label: "ประกันสุขภาพ", kind: invest, hint: "เบี้ยประกันสุขภาพตัวเอง สูงสุด 25000 (รวมกับประกันชีวิตไม่เกิน 100000): /deduct health_ins 20000"}
+  - {key: parents_health, label: "ประกันสุขภาพบิดามารดา", kind: invest, hint: "เบี้ยประกันสุขภาพบิดามารดา สูงสุด 15000: /deduct parents_health 15000"}
+  - {key: social_security, label: "ประกันสังคม", hint: "ยอดที่จ่ายจริงทั้งปี สูงสุด 9000: /deduct social_security 9000"}
+  - {key: home_loan, label: "ดอกเบี้ยบ้าน", hint: "ดอกเบี้ยที่จ่ายจริงตามใบรับรองจากธนาคาร สูงสุด 100000: /deduct home_loan 80000"}
+  - {key: donation, label: "เงินบริจาค", hint: "ใส่ยอดที่นับลดหย่อนได้จริงเอง (บริจาคการศึกษา/กีฬา/รพ.รัฐนับ 2 เท่า, รวมไม่เกิน 10% ของเงินได้สุทธิ): /deduct donation 10000"}
+  - {key: easy_ereceipt, label: "Easy E-Receipt", hint: "ยอดซื้อที่มีใบกำกับภาษีอิเล็กทรอนิกส์ตามเงื่อนไขมาตรการปีนี้: /deduct easy_ereceipt 30000"}
+  - {key: travel, label: "ท่องเที่ยว", hint: "ตามเงื่อนไขมาตรการปีนี้: /deduct travel 20000"}
+  - {key: new_home, label: "สร้างบ้านใหม่", hint: "10000 ต่อทุก 1 ล้านบาทของค่าก่อสร้าง ตามมาตรการ: /deduct new_home 30000"}
