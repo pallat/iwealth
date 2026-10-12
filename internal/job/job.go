@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -46,6 +48,17 @@ type Job struct {
 	Now     func() time.Time
 	// Sleep waits d or until ctx is done (returning ctx.Err()). Defaults to a timer.
 	Sleep func(ctx context.Context, d time.Duration) error
+	// Log receives operational events (per-fund ingest results, advisor errors).
+	// Nil is silent. Messages never include keys, tokens, income or amounts.
+	Log *slog.Logger
+	// Tick is how often Loop re-reads the wall clock (default 1 minute).
+	Tick time.Duration
+}
+
+func (j *Job) log(level slog.Level, msg string, args ...any) {
+	if j.Log != nil {
+		j.Log.Log(context.Background(), level, msg, args...)
+	}
 }
 
 // bangkok is the market calendar. Thailand has no DST, so the fixed-zone
@@ -139,6 +152,67 @@ func NextRun(now time.Time, runAt string) time.Time {
 	return t
 }
 
+// OnceDate is the date a manual `-once` run targets: today (Bangkok) if it is a weekday and
+// RUN_AT has passed, otherwise the most recent earlier weekday.
+func OnceDate(now time.Time, runAt string) time.Time {
+	d := bkkDate(now)
+	if wd := d.Weekday(); wd != time.Saturday && wd != time.Sunday && !now.Before(at(d, runAt)) {
+		return d
+	}
+	return prevWeekdays(d, 1)[0]
+}
+
+func (j *Job) tick() time.Duration {
+	if j.Tick > 0 {
+		return j.Tick
+	}
+	return time.Minute
+}
+
+// due reports whether the daily run should start at now: a weekday, inside
+// [RunAt, RetryUntil], with at least one tracked fund lacking today's NAV.
+func (j *Job) due(ctx context.Context, now time.Time) bool {
+	d := bkkDate(now)
+	if wd := d.Weekday(); wd == time.Saturday || wd == time.Sunday {
+		return false
+	}
+	if now.Before(at(d, j.Cfg.RunAt)) || now.After(at(d, j.Cfg.RetryUntil)) {
+		return false
+	}
+	for _, f := range j.Cfg.Funds {
+		has, err := j.Store.HasNAV(ctx, f.Code, d)
+		if err != nil || !has {
+			return true
+		}
+	}
+	return false
+}
+
+// Loop is the daily scheduler. It wakes at least every Tick (default 1 minute) and
+// re-reads the wall clock each time, so a clock step (a Pi without an RTC syncing
+// after boot) or a restart inside the run window cannot skip or delay the run.
+// It returns nil once ctx is done.
+func (j *Job) Loop(ctx context.Context) error {
+	var lastRun time.Time
+	logged := false
+	for {
+		now := j.now()
+		today := bkkDate(now)
+		if !today.Equal(lastRun) && j.due(ctx, now) {
+			lastRun, logged = today, false
+			if err := j.RunDaily(ctx, today); err != nil && ctx.Err() == nil {
+				j.log(slog.LevelError, "daily run failed", "date", today.Format("2006-01-02"), "err", err)
+			}
+		} else if !logged {
+			logged = true
+			j.log(slog.LevelInfo, "next run", "at", NextRun(now, j.Cfg.RunAt).Format(time.RFC3339))
+		}
+		if err := j.sleep(ctx, j.tick()); err != nil {
+			return nil
+		}
+	}
+}
+
 // ---- formatting ----
 
 func money(v float64) string {
@@ -174,16 +248,55 @@ func label(t config.FundType) string { return strings.ToUpper(string(t)) }
 
 // ---- ingest ----
 
-// RunOnce ingests `date` (a Bangkok calendar date); missing lists funds whose NAV is not yet published.
+// backfillWeekdays is how many weekdays before the run date are re-checked for gaps.
+const backfillWeekdays = 5
+
+// prevWeekdays returns up to n weekdays before date, newest first.
+func prevWeekdays(date time.Time, n int) []time.Time {
+	var out []time.Time
+	y, m, d := date.Date()
+	for i := 1; len(out) < n; i++ {
+		t := time.Date(y, m, d-i, 0, 0, 0, 0, bangkok)
+		if wd := t.Weekday(); wd != time.Saturday && wd != time.Sunday {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// lazyText fetches the context text at most once, and only when first needed.
+type lazyText struct {
+	fn   func(ctx context.Context) string
+	done bool
+	text string
+}
+
+func (l *lazyText) get(ctx context.Context) string {
+	if !l.done {
+		l.done = true
+		if l.fn != nil {
+			l.text = l.fn(ctx)
+		}
+	}
+	return l.text
+}
+
+// RunOnce ingests `date` (a Bangkok calendar date); missing lists funds whose NAV is not yet
+// published for that date. It also backfills the last few weekdays still absent from the
+// store, and ingests BENCHMARKS that are not tracked funds; those are best-effort only
+// (never reported in missing, never an error, never alerted).
 func (j *Job) RunOnce(ctx context.Context, date time.Time) (missing []string, err error) {
 	date = bkkDate(date)
 	var errs []error
+	text := &lazyText{fn: j.Context}
+	older := prevWeekdays(date, backfillWeekdays)
 	for _, f := range j.Cfg.Funds {
 		if ctx.Err() != nil {
 			errs = append(errs, ctx.Err())
 			break
 		}
-		ok, e := j.ingest(ctx, f, date)
+		j.backfill(ctx, f.Code, older)
+		ok, e := j.ingest(ctx, f.Code, date)
 		if e != nil {
 			errs = append(errs, fmt.Errorf("fund %s: %w", f.Code, e))
 			continue
@@ -192,29 +305,76 @@ func (j *Job) RunOnce(ctx context.Context, date time.Time) (missing []string, er
 			missing = append(missing, f.Code)
 			continue
 		}
-		if e := j.evaluate(ctx, f, date); e != nil {
+		if e := j.evaluate(ctx, f, date, text); e != nil {
 			errs = append(errs, fmt.Errorf("fund %s: %w", f.Code, e))
 		}
+	}
+	for _, code := range j.extraBenchmarks() {
+		if ctx.Err() != nil {
+			break
+		}
+		j.backfill(ctx, code, older)
+		_, _ = j.ingest(ctx, code, date) // best-effort; ingest already logs the outcome
 	}
 	return missing, errors.Join(errs...)
 }
 
-func (j *Job) ingest(ctx context.Context, f config.Fund, date time.Time) (bool, error) {
-	has, err := j.Store.HasNAV(ctx, f.Code, date)
+// extraBenchmarks are BENCHMARKS codes that are not tracked funds.
+func (j *Job) extraBenchmarks() []string {
+	var out []string
+	for _, b := range j.Cfg.Benchmarks {
+		tracked := false
+		for _, f := range j.Cfg.Funds {
+			if strings.EqualFold(f.Code, b) {
+				tracked = true
+				break
+			}
+		}
+		if !tracked && !slices.Contains(out, b) {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// backfill fetches earlier days that are absent from the store; failures are non-fatal.
+func (j *Job) backfill(ctx context.Context, code string, days []time.Time) {
+	for _, d := range days {
+		if ctx.Err() != nil {
+			return
+		}
+		_, _ = j.ingest(ctx, code, d)
+	}
+}
+
+func (j *Job) ingest(ctx context.Context, code string, date time.Time) (bool, error) {
+	day := date.Format("2006-01-02")
+	has, err := j.Store.HasNAV(ctx, code, date)
 	if err != nil {
+		j.log(slog.LevelWarn, "nav check failed", "fund", code, "date", day, "err", err)
 		return false, err
 	}
 	if has {
 		return true, nil
 	}
-	nav, ok, err := j.SEC.DailyNAV(ctx, f.Code, date)
-	if err != nil || !ok {
+	nav, ok, err := j.SEC.DailyNAV(ctx, code, date)
+	if err != nil {
+		j.log(slog.LevelWarn, "nav fetch failed", "fund", code, "date", day, "err", err)
 		return false, err
 	}
-	return true, j.Store.UpsertNAV(ctx, f.Code, date, nav)
+	if !ok {
+		j.log(slog.LevelInfo, "nav not published", "fund", code, "date", day)
+		return false, nil
+	}
+	if err := j.Store.UpsertNAV(ctx, code, date, nav); err != nil {
+		j.log(slog.LevelWarn, "nav store failed", "fund", code, "date", day, "err", err)
+		return false, err
+	}
+	j.log(slog.LevelInfo, "nav found", "fund", code, "date", day, "nav", nav)
+	return true, nil
 }
 
-func (j *Job) evaluate(ctx context.Context, f config.Fund, date time.Time) error {
+func (j *Job) evaluate(ctx context.Context, f config.Fund, date time.Time, text *lazyText) error {
 	hist, err := j.Store.History(ctx, f.Code)
 	if err != nil {
 		return err
@@ -241,20 +401,20 @@ func (j *Job) evaluate(ctx context.Context, f config.Fund, date time.Time) error
 	}
 
 	// Facts for the LLM: public market data only, never income or amounts.
-	var ctxText string
-	if j.Context != nil {
-		ctxText = j.Context(ctx)
-	}
+	ctxText := text.get(ctx)
 	facts := fmt.Sprintf("fund: %s\ntype: %s\nlatest NAV: %.4f on %s\npeak NAV: %.4f on %s\ndrop from peak: %.1f%%\npeak window: %d trading days\n",
 		f.Code, f.Type, latest.NAV, latest.Date.Format("2006-01-02"), peak.NAV, peak.Date.Format("2006-01-02"), drop, j.Cfg.PeakWindowDays)
 	if strings.TrimSpace(ctxText) != "" {
-		facts += "context:\n" + ctxText + "\n"
+		// The closing tag is stripped so fetched text cannot break out of the delimiters.
+		ctxText = strings.ReplaceAll(ctxText, "</untrusted_context>", "")
+		facts += "context:\n<untrusted_context>\n" + ctxText + "\n</untrusted_context>\n"
 	}
 	var narrative string
 	if j.Advisor != nil {
 		narrative, err = j.Advisor.Summarize(ctx, facts)
 		narrative = strings.TrimSpace(narrative)
 		if err != nil {
+			j.log(slog.LevelWarn, "advisor failed", "fund", f.Code, "err", err)
 			narrative = ""
 		}
 	}
