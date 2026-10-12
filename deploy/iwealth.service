@@ -1,0 +1,17 @@
+[Unit]
+Description=iwealth personal fund agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=iwealth
+WorkingDirectory=/opt/iwealth
+ExecStart=/opt/iwealth/iwealth-arm64
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/iwealth
+
+[Install]
+WantedBy=multi-user.target
