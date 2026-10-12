@@ -31,6 +31,7 @@ type Config struct {
 	AnnualNetIncome                       float64
 	AnnualGrossIncome                     float64 // optional; enables %-of-income deduction limits
 	RunAt, RetryUntil                     string
+	YearEndMonth, YearEndDay              int // year-end reminder start (month 0 = off)
 	RetryInterval                         time.Duration
 	ContextProviders                      []string
 	Benchmarks, RSSURLs                   []string
@@ -45,8 +46,8 @@ func Load(getenv func(string) string) (*Config, error) {
 		TelegramToken: getenv("TELEGRAM_BOT_TOKEN"),
 		SearchAPIURL:  getenv("SEARCH_API_URL"),
 		SearchAPIKey:  getenv("SEARCH_API_KEY"),
-		RunAt:         or(getenv("RUN_AT"), "20:00"),
-		RetryUntil:    or(getenv("RETRY_UNTIL"), "23:30"),
+		RunAt:         or(getenv("RUN_AT"), "04:00"),
+		RetryUntil:    or(getenv("RETRY_UNTIL"), "08:00"),
 		DBPath:        or(getenv("DB_PATH"), "iwealth.db"),
 		TaxRulesPath:  or(getenv("TAX_RULES_PATH"), "tax_rules.yaml"),
 	}
@@ -77,6 +78,9 @@ func Load(getenv func(string) string) (*Config, error) {
 			return nil, fmt.Errorf("ANNUAL_NET_INCOME: %w", err)
 		}
 	}
+	if c.YearEndMonth, c.YearEndDay, err = parseMonthDay(or(getenv("YEAR_END_REMINDER_FROM"), "12-01")); err != nil {
+		return nil, fmt.Errorf("YEAR_END_REMINDER_FROM: %w", err)
+	}
 	if v := getenv("ANNUAL_GROSS_INCOME"); v != "" {
 		if c.AnnualGrossIncome, err = strconv.ParseFloat(v, 64); err != nil || c.AnnualGrossIncome < 0 {
 			return nil, fmt.Errorf("ANNUAL_GROSS_INCOME must be a non-negative number")
@@ -89,6 +93,24 @@ func Load(getenv func(string) string) (*Config, error) {
 	c.Benchmarks = split(getenv("BENCHMARKS"))
 	c.RSSURLs = split(getenv("RSS_URLS"))
 	return c, nil
+}
+
+// parseMonthDay reads "MM-DD", or "off" (month 0).
+func parseMonthDay(s string) (month, day int, err error) {
+	if strings.EqualFold(s, "off") {
+		return 0, 0, nil
+	}
+	ms, ds, ok := strings.Cut(s, "-")
+	if !ok {
+		return 0, 0, fmt.Errorf("%q must be MM-DD or off", s)
+	}
+	m, e1 := strconv.Atoi(ms)
+	d, e2 := strconv.Atoi(ds)
+	if e1 != nil || e2 != nil || m < 1 || m > 12 || d < 1 || d > 31 ||
+		time.Date(2024, time.Month(m), d, 0, 0, 0, 0, time.UTC).Day() != d { // 2024 is a leap year
+		return 0, 0, fmt.Errorf("%q is not a valid MM-DD date", s)
+	}
+	return m, d, nil
 }
 
 func or(v, d string) string {

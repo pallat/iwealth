@@ -37,6 +37,8 @@ type Store interface {
 	PaidByType(ctx context.Context, year int) (map[config.FundType]float64, error)
 	SetDeduction(ctx context.Context, year int, key config.FundType, amount float64) error
 	Deductions(ctx context.Context, year int) (map[config.FundType]float64, error)
+	ReminderSent(ctx context.Context, day time.Time) (bool, error)
+	MarkReminderSent(ctx context.Context, day time.Time) error
 }
 
 type Job struct {
@@ -154,14 +156,42 @@ func NextRun(now time.Time, runAt string) time.Time {
 	return t
 }
 
-// OnceDate is the date a manual `-once` run targets: today (Bangkok) if it is a weekday and
-// RUN_AT has passed, otherwise the most recent earlier weekday.
+// morning reports whether RUN_AT is early in the day (before 12:00). Such a run
+// ingests the previous weekday's NAV, which is published the evening before.
+func morning(runAt string) bool {
+	h, _, _ := parseClock(runAt)
+	return h < 12
+}
+
+// NAVDate is the NAV date a run on runDay ingests: the previous weekday for a
+// morning RUN_AT, otherwise runDay itself (the previous weekday if runDay is a weekend).
+func NAVDate(runDay time.Time, runAt string) time.Time {
+	d := bkkDate(runDay)
+	if wd := d.Weekday(); morning(runAt) || wd == time.Saturday || wd == time.Sunday {
+		return prevWeekdays(d, 1)[0]
+	}
+	return d
+}
+
+// runsOn reports whether the daily ingest runs on runDay: Monday to Friday for an
+// evening RUN_AT, Tuesday to Saturday for a morning one (Sunday and Monday would
+// only repeat Saturday's Friday NAV).
+func runsOn(runDay time.Time, runAt string) bool {
+	wd := bkkDate(runDay).Weekday()
+	if morning(runAt) {
+		return wd != time.Sunday && wd != time.Monday
+	}
+	return wd != time.Saturday && wd != time.Sunday
+}
+
+// OnceDate is the NAV date a manual `-once` run targets: the one the scheduler would
+// ingest for the latest run time (today's RUN_AT if it has passed, otherwise yesterday's).
 func OnceDate(now time.Time, runAt string) time.Time {
 	d := bkkDate(now)
-	if wd := d.Weekday(); wd != time.Saturday && wd != time.Sunday && !now.Before(at(d, runAt)) {
-		return d
+	if now.Before(at(d, runAt)) {
+		d = time.Date(d.Year(), d.Month(), d.Day()-1, 0, 0, 0, 0, bangkok)
 	}
-	return prevWeekdays(d, 1)[0]
+	return NAVDate(d, runAt)
 }
 
 func (j *Job) tick() time.Duration {
@@ -171,18 +201,19 @@ func (j *Job) tick() time.Duration {
 	return time.Minute
 }
 
-// due reports whether the daily run should start at now: a weekday, inside
-// [RunAt, RetryUntil], with at least one tracked fund lacking today's NAV.
+// due reports whether the daily run should start at now: a run day, inside
+// [RunAt, RetryUntil], with at least one tracked fund lacking the target NAV.
 func (j *Job) due(ctx context.Context, now time.Time) bool {
 	d := bkkDate(now)
-	if wd := d.Weekday(); wd == time.Saturday || wd == time.Sunday {
+	if !runsOn(d, j.Cfg.RunAt) {
 		return false
 	}
 	if now.Before(at(d, j.Cfg.RunAt)) || now.After(at(d, j.Cfg.RetryUntil)) {
 		return false
 	}
+	target := NAVDate(d, j.Cfg.RunAt)
 	for _, f := range j.Cfg.Funds {
-		has, err := j.Store.HasNAV(ctx, f.Code, d)
+		has, err := j.Store.HasNAV(ctx, f.Code, target)
 		if err != nil || !has {
 			return true
 		}
@@ -209,6 +240,7 @@ func (j *Job) Loop(ctx context.Context) error {
 			logged = true
 			j.log(slog.LevelInfo, "next run", "at", NextRun(now, j.Cfg.RunAt).Format(time.RFC3339))
 		}
+		j.yearEndReminder(ctx, now)
 		if err := j.sleep(ctx, j.tick()); err != nil {
 			return nil
 		}
@@ -467,13 +499,15 @@ func (j *Job) planLines(ctx context.Context, t config.FundType, year int) string
 		label(t), year, money(p.Suggested), money(p.TaxSaved))
 }
 
-// RunDaily retries RunOnce every RetryInterval until nothing is missing or RetryUntil passes.
-func (j *Job) RunDaily(ctx context.Context, date time.Time) error {
-	date = bkkDate(date)
-	if wd := date.Weekday(); wd == time.Saturday || wd == time.Sunday {
+// RunDaily is the run for runDay: it retries RunOnce for that day's NAV date every
+// RetryInterval until nothing is missing or RetryUntil passes.
+func (j *Job) RunDaily(ctx context.Context, runDay time.Time) error {
+	runDay = bkkDate(runDay)
+	if !runsOn(runDay, j.Cfg.RunAt) {
 		return nil
 	}
-	deadline := at(date, j.Cfg.RetryUntil)
+	date := NAVDate(runDay, j.Cfg.RunAt)
+	deadline := at(runDay, j.Cfg.RetryUntil)
 	var missing []string
 	var err error
 	for {
@@ -495,7 +529,7 @@ func (j *Job) RunDaily(ctx context.Context, date time.Time) error {
 	var msg string
 	switch {
 	case err == nil && len(missing) == len(j.Cfg.Funds):
-		msg = "วันนี้ยังไม่พบ NAV ของทุกกอง (อาจเป็นวันหยุดตลาด)"
+		msg = "ยังไม่พบ NAV ของทุกกองสำหรับวันที่ " + date.Format("2006-01-02") + " (อาจเป็นวันหยุดตลาด)"
 	default:
 		var parts []string
 		if len(missing) > 0 {
@@ -510,6 +544,93 @@ func (j *Job) RunDaily(ctx context.Context, date time.Time) error {
 		err = errors.Join(err, fmt.Errorf("send notice: %w", e))
 	}
 	return err
+}
+
+// ---- year-end reminder ----
+
+// ReminderDue reports whether a year-end reminder falls on day: from the start
+// date (month/day) every 7 days, and daily during the last 5 days of the year.
+// month 0 disables it.
+func ReminderDue(day time.Time, month, dayOfMonth int) bool {
+	if month == 0 {
+		return false
+	}
+	d := bkkDate(day)
+	start := time.Date(d.Year(), time.Month(month), dayOfMonth, 0, 0, 0, 0, bangkok)
+	if d.Before(start) {
+		return false
+	}
+	lastDay := time.Date(d.Year(), time.December, 31, 0, 0, 0, 0, bangkok)
+	if int(lastDay.Sub(d).Hours()/24+0.5) < 5 {
+		return true
+	}
+	return int(d.Sub(start).Hours()/24+0.5)%7 == 0
+}
+
+// yearEndReminder sends the "use your remaining deduction room" message at most
+// once per day, once RUN_AT has passed. Failures are logged and retried next tick.
+func (j *Job) yearEndReminder(ctx context.Context, now time.Time) {
+	d := bkkDate(now)
+	if now.Before(at(d, j.Cfg.RunAt)) || !ReminderDue(d, j.Cfg.YearEndMonth, j.Cfg.YearEndDay) {
+		return
+	}
+	sent, err := j.Store.ReminderSent(ctx, d)
+	if err != nil {
+		j.log(slog.LevelWarn, "reminder check failed", "err", err)
+		return
+	}
+	if sent {
+		return
+	}
+	msg := j.yearEndMessage(ctx, d)
+	if msg != "" {
+		if err := j.Notify.Send(ctx, msg); err != nil {
+			j.log(slog.LevelWarn, "year-end reminder send failed", "err", err)
+			return
+		}
+		j.log(slog.LevelInfo, "year-end reminder sent")
+	}
+	// Marked even when nothing was left to say, so the check is not repeated every tick.
+	if err := j.Store.MarkReminderSent(ctx, d); err != nil {
+		j.log(slog.LevelWarn, "reminder mark failed", "err", err)
+	}
+}
+
+// yearEndMessage lists the room left for each tracked tax fund type, or "" when
+// every tracked type is full (or none is tracked).
+func (j *Job) yearEndMessage(ctx context.Context, d time.Time) string {
+	paid, err := j.allPaid(ctx, d.Year())
+	if err != nil {
+		return ""
+	}
+	last := time.Date(d.Year(), time.December, 31, 0, 0, 0, 0, bangkok)
+	daysLeft := int(last.Sub(d).Hours()/24 + 0.5)
+	seen := map[config.FundType]bool{}
+	var b strings.Builder
+	for _, f := range j.Cfg.Funds {
+		if !isTax(f.Type) || seen[f.Type] {
+			continue
+		}
+		seen[f.Type] = true
+		if _, ok := plan.Build(j.Rules, j.Cfg.AnnualNetIncome, j.Cfg.AnnualGrossIncome, paid, f.Type); !ok {
+			continue
+		}
+		var codes []string
+		for _, g := range j.Cfg.Funds {
+			if g.Type == f.Type {
+				codes = append(codes, g.Code)
+			}
+		}
+		fmt.Fprintf(&b, "\n%s (%s)\n%s\n", label(f.Type), strings.Join(codes, ", "), j.planLines(ctx, f.Type, d.Year()))
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	head := fmt.Sprintf("เตือนปลายปี %d: เหลืออีก %d วัน ยังใช้สิทธิ์ลดหย่อนไม่เต็ม", d.Year(), daysLeft)
+	tail := "\nรายการด้านบนใช้สิทธิ์ร่วมกันในเพดานรวม จึงรวมซื้อทุกกองไม่ได้เกินสิทธิ์คงเหลือของกลุ่ม" +
+		"\nซื้อให้ทันก่อนวันทำการสุดท้ายของปี (รายการซื้อต้องอนุมัติภายในปีภาษี) ตรวจเงื่อนไขกับ บลจ. ก่อนซื้อ" +
+		"\nถ้ามียอด PVD/ประกันบำนาญ ใช้ /deduct บันทึกให้ครบเพื่อให้ตัวเลขตรง"
+	return head + "\n" + strings.TrimRight(b.String(), "\n") + "\n" + tail
 }
 
 // ---- commands ----

@@ -781,3 +781,173 @@ func TestGrossIncomeLimitsRoom(t *testing.T) {
 		t.Errorf("hint expected when gross unset: %s", tr)
 	}
 }
+
+func morningSetup(t *testing.T, funds ...config.Fund) *env {
+	e := setup(t, funds...)
+	e.j.Cfg.RunAt, e.j.Cfg.RetryUntil = "04:00", "08:00"
+	return e
+}
+
+func TestNAVDateAndRunsOnMorning(t *testing.T) {
+	cases := []struct {
+		runDay   time.Time
+		want     time.Time
+		runsOn04 bool
+	}{
+		{day(10, 13), day(10, 12), true},  // Tue -> Mon
+		{day(10, 17), day(10, 16), true},  // Sat -> Fri
+		{day(10, 18), day(10, 16), false}, // Sun repeats Sat
+		{day(10, 12), day(10, 9), false},  // Mon repeats Sat
+	}
+	for _, c := range cases {
+		if got := NAVDate(c.runDay, "04:00"); !got.Equal(c.want) {
+			t.Errorf("NAVDate(%v)=%v want %v", c.runDay, got, c.want)
+		}
+		if got := runsOn(c.runDay, "04:00"); got != c.runsOn04 {
+			t.Errorf("runsOn(%v)=%v want %v", c.runDay, got, c.runsOn04)
+		}
+	}
+	if got := NAVDate(day(10, 12), "20:00"); !got.Equal(day(10, 12)) {
+		t.Errorf("evening mode must keep same day, got %v", got)
+	}
+	if got := OnceDate(time.Date(2026, 10, 13, 5, 0, 0, 0, bangkok), "04:00"); !got.Equal(day(10, 12)) {
+		t.Errorf("OnceDate after 04:00 Tue = %v", got)
+	}
+	if got := OnceDate(time.Date(2026, 10, 13, 3, 0, 0, 0, bangkok), "04:00"); !got.Equal(day(10, 9)) {
+		t.Errorf("OnceDate before 04:00 Tue = %v (want Fri)", got)
+	}
+}
+
+func TestLoopMorningIngestsPreviousWeekday(t *testing.T) {
+	e := morningSetup(t)
+	e.now = time.Date(2026, 10, 13, 3, 0, 0, 0, bangkok) // Tue 03:00
+	e.seed(t, "ABC-RMF", day(10, 9), 100)
+	e.sec.set("ABC-RMF", day(10, 12), 80) // Monday's NAV
+	runLoop(t, e, time.Date(2026, 10, 13, 6, 0, 0, 0, bangkok), nil)
+	if len(e.n.msgs) != 1 || !strings.Contains(e.n.msgs[0], "ABC-RMF") {
+		t.Fatalf("want one alert from Monday's NAV, got %v", e.n.msgs)
+	}
+	if ok, _ := e.st.HasNAV(context.Background(), "ABC-RMF", day(10, 12)); !ok {
+		t.Fatal("Monday NAV not stored")
+	}
+}
+
+func TestLoopMorningSaturdayRunsSundayMondayDoNot(t *testing.T) {
+	e := morningSetup(t)
+	e.seed(t, "ABC-RMF", day(10, 15), 100)
+	e.sec.set("ABC-RMF", day(10, 16), 80) // Friday's NAV, fetched Saturday
+	e.now = time.Date(2026, 10, 17, 3, 0, 0, 0, bangkok)
+	runLoop(t, e, time.Date(2026, 10, 17, 6, 0, 0, 0, bangkok), nil)
+	if len(e.n.msgs) != 1 {
+		t.Fatalf("Saturday must ingest Friday: %v", e.n.msgs)
+	}
+	// Friday NAV unpublished (holiday): Sunday and Monday stay silent
+	e2 := morningSetup(t)
+	e2.seed(t, "ABC-RMF", day(10, 15), 100)
+	for _, start := range []time.Time{time.Date(2026, 10, 18, 3, 0, 0, 0, bangkok), time.Date(2026, 10, 19, 3, 0, 0, 0, bangkok)} {
+		e2.now = start
+		runLoop(t, e2, start.Add(5*time.Hour), nil)
+	}
+	if len(e2.n.msgs) != 0 {
+		t.Fatalf("Sun/Mon must not run: %v", e2.n.msgs)
+	}
+}
+
+func TestRunDailyMorningNoticeNamesNAVDate(t *testing.T) {
+	e := morningSetup(t)
+	e.now = time.Date(2026, 10, 14, 7, 59, 0, 0, bangkok) // one retry left
+	if err := e.j.RunDaily(context.Background(), day(10, 14)); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.n.msgs) != 1 || !strings.Contains(e.n.msgs[0], "2026-10-13") {
+		t.Fatalf("notice should name the NAV date: %v", e.n.msgs)
+	}
+}
+
+func TestReminderDue(t *testing.T) {
+	cases := []struct {
+		d    time.Time
+		want bool
+	}{
+		{day(11, 30), false}, // before start
+		{day(12, 1), true},   // start
+		{day(12, 2), false},
+		{day(12, 8), true}, // +7
+		{day(12, 15), true},
+		{day(12, 22), true},
+		{day(12, 26), false},
+		{day(12, 27), true}, // last 5 days daily
+		{day(12, 31), true},
+	}
+	for _, c := range cases {
+		if got := ReminderDue(c.d, 12, 1); got != c.want {
+			t.Errorf("ReminderDue(%v)=%v want %v", c.d.Format("01-02"), got, c.want)
+		}
+	}
+	if ReminderDue(day(12, 31), 0, 0) {
+		t.Error("month 0 must disable")
+	}
+}
+
+func TestYearEndReminder(t *testing.T) {
+	e := setup(t, config.Fund{Code: "ABC-RMF", Type: config.RMF}, config.Fund{Code: "ORD", Type: config.Ordinary})
+	ctx := context.Background()
+	e.j.Cfg.YearEndMonth, e.j.Cfg.YearEndDay = 12, 1
+	e.j.Cfg.RunAt = "04:00"
+	e.st.AddPaid(ctx, "ABC-RMF", config.RMF, 100000, day(6, 1))
+	room := e.j.Rules.RemainingRoom(config.RMF, map[config.FundType]float64{config.RMF: 100000}, 0)
+
+	e.now = time.Date(2026, 12, 1, 3, 0, 0, 0, bangkok) // before RUN_AT
+	e.j.yearEndReminder(ctx, e.now)
+	if len(e.n.msgs) != 0 {
+		t.Fatalf("too early: %v", e.n.msgs)
+	}
+	e.now = time.Date(2026, 12, 1, 4, 0, 0, 0, bangkok)
+	e.j.yearEndReminder(ctx, e.now)
+	e.j.yearEndReminder(ctx, e.now.Add(time.Minute)) // same day: no repeat
+	if len(e.n.msgs) != 1 {
+		t.Fatalf("want exactly one reminder, got %d", len(e.n.msgs))
+	}
+	for _, w := range []string{"เตือนปลายปี 2026", "30 วัน", "RMF", "ABC-RMF", money(room)} {
+		if !strings.Contains(e.n.msgs[0], w) {
+			t.Errorf("reminder missing %q:\n%s", w, e.n.msgs[0])
+		}
+	}
+	if strings.Contains(e.n.msgs[0], "ORD") {
+		t.Errorf("ordinary fund must not appear:\n%s", e.n.msgs[0])
+	}
+	// not a reminder day
+	e.now = time.Date(2026, 12, 2, 5, 0, 0, 0, bangkok)
+	e.j.yearEndReminder(ctx, e.now)
+	if len(e.n.msgs) != 1 {
+		t.Fatalf("Dec 2 is not a reminder day: %d", len(e.n.msgs))
+	}
+	// room fully used -> silent
+	e.st.AddPaid(ctx, "ABC-RMF", config.RMF, 400000, day(6, 2))
+	e.now = time.Date(2026, 12, 8, 5, 0, 0, 0, bangkok)
+	e.j.yearEndReminder(ctx, e.now)
+	if len(e.n.msgs) != 1 {
+		t.Fatalf("no room left must stay silent: %d", len(e.n.msgs))
+	}
+	// disabled
+	e.j.Cfg.YearEndMonth = 0
+	e.now = time.Date(2026, 12, 15, 5, 0, 0, 0, bangkok)
+	e.j.yearEndReminder(ctx, e.now)
+	if len(e.n.msgs) != 1 {
+		t.Fatal("disabled reminder sent")
+	}
+}
+
+func TestYearEndReminderSendFailureRetries(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	e.j.Cfg.YearEndMonth, e.j.Cfg.YearEndDay = 12, 1
+	e.now = time.Date(2026, 12, 1, 21, 0, 0, 0, bangkok)
+	e.n.fail = true
+	e.j.yearEndReminder(ctx, e.now)
+	e.n.fail = false
+	e.j.yearEndReminder(ctx, e.now.Add(time.Minute))
+	if len(e.n.msgs) != 1 {
+		t.Fatalf("failed send must retry on next tick: %d", len(e.n.msgs))
+	}
+}

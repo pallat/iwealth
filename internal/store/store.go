@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS nav (fund TEXT NOT NULL, date TEXT NOT NULL, nav REAL
 CREATE TABLE IF NOT EXISTS alert_state (fund TEXT PRIMARY KEY, level REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS tax_paid (id INTEGER PRIMARY KEY AUTOINCREMENT, fund TEXT NOT NULL, type TEXT NOT NULL, amount REAL NOT NULL, paid_on TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS deduction_entry (year INTEGER NOT NULL, key TEXT NOT NULL, amount REAL NOT NULL, PRIMARY KEY (year, key));
+CREATE TABLE IF NOT EXISTS year_end_reminder (day TEXT PRIMARY KEY);
 `
 
 func Open(path string) (*Store, error) {
@@ -141,4 +142,15 @@ func (s *Store) Deductions(ctx context.Context, year int) (map[config.FundType]f
 		out[config.FundType(k)] = a
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) ReminderSent(ctx context.Context, day time.Time) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM year_end_reminder WHERE day=?`, day.Format(dayFmt)).Scan(&n)
+	return n > 0, err
+}
+
+func (s *Store) MarkReminderSent(ctx context.Context, day time.Time) error {
+	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO year_end_reminder(day) VALUES(?)`, day.Format(dayFmt))
+	return err
 }

@@ -17,7 +17,7 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.PeakWindowDays != 252 || c.RunAt != "20:00" || c.RetryUntil != "23:30" {
+	if c.PeakWindowDays != 252 || c.RunAt != "04:00" || c.RetryUntil != "08:00" || c.YearEndMonth != 12 || c.YearEndDay != 1 {
 		t.Fatalf("bad defaults: %+v", c)
 	}
 	if len(c.Funds) != 2 || c.Funds[0] != (Fund{"ABC-RMF", RMF}) || c.Funds[1].Type != Ordinary {
@@ -93,5 +93,24 @@ func TestGrossIncome(t *testing.T) {
 	}
 	if c, _ = load(map[string]string{"ANNUAL_GROSS_INCOME": "400000"}); c.Validate() == nil {
 		t.Error("net > gross must fail")
+	}
+}
+
+func TestYearEndReminderFrom(t *testing.T) {
+	load := func(v string) (*Config, error) {
+		b := base()
+		b["YEAR_END_REMINDER_FROM"] = v
+		return Load(env(b))
+	}
+	if c, err := load("11-15"); err != nil || c.YearEndMonth != 11 || c.YearEndDay != 15 {
+		t.Fatalf("%+v %v", c, err)
+	}
+	if c, err := load("off"); err != nil || c.YearEndMonth != 0 {
+		t.Fatalf("off: %+v %v", c, err)
+	}
+	for _, bad := range []string{"13-01", "12-32", "02-30", "dec", "12", "0-1"} {
+		if _, err := load(bad); err == nil {
+			t.Errorf("%q should fail", bad)
+		}
 	}
 }

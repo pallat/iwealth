@@ -31,7 +31,8 @@ Edit `.env`. The main keys:
 | `FUNDS` | Your funds as `CODE:type`, separated by commas. Type is `rmf`, `ssf`, `thaiesg` or `ordinary`. Example: `EXAMPLE-RMF:rmf,EXAMPLE-FUND:ordinary` |
 | `ANNUAL_NET_INCOME` | Your yearly net taxable income in baht **before** every deduction iwealth tracks: RMF, SSF, Thai ESG and the `/deduct` items (PVD, pension insurance, ...). Other deductions (family, life insurance, ...) should already be taken out. What you record with `/paid` and `/deduct` is subtracted from it for the estimate. Required if any fund is a tax fund. |
 | `ANNUAL_GROSS_INCOME` | Optional. Your yearly gross income before any deduction. Turns on the percentage-of-income limits (`pct:` in `tax_rules.yaml`, for example RMF 30%). Without it only the baht caps apply, and `/tax` says so. |
-| `RUN_AT` / `RETRY_UNTIL` / `RETRY_INTERVAL` | Daily run time (default `20:00`), last retry time (`23:30`), and gap between retries (`30m`). Times are Asia/Bangkok. |
+| `RUN_AT` / `RETRY_UNTIL` / `RETRY_INTERVAL` | Daily run time (default `04:00`), last retry time (`08:00`), and gap between retries (`30m`). Times are Asia/Bangkok. A `RUN_AT` before 12:00 ingests the **previous weekday's** NAV and runs Tuesday to Saturday (Saturday fetches Friday). A `RUN_AT` from 12:00 on ingests the same day's NAV and runs Monday to Friday. |
+| `YEAR_END_REMINDER_FROM` | `MM-DD` (default `12-01`) or `off`. From that date, once `RUN_AT` has passed, sends a reminder to use the remaining deduction room: weekly, then daily over the last 5 days of the year. Silent when every tracked tax fund type is full. |
 | `DROP_TRIGGERS` | Alert levels in percent (default `5,10,15`). |
 | `PEAK_WINDOW_DAYS` | Trading days used to find the peak (default `252`). |
 | `BENCHMARKS` | SEC fund abbreviations to compare against. Empty means your tracked funds' own history. Codes not in `FUNDS` are fetched daily too (history only, never alerted). |
@@ -106,7 +107,7 @@ The service runs as a user called `iwealth`. Its working directory is `/opt/iwea
    ssh pi@raspberrypi.local 'cd /opt/iwealth && sudo -u iwealth ./iwealth-arm64 -once'
    ```
 
-   `-once` runs a single ingest, with no retry loop, for the most recent weekday that should have data (today if it is a weekday after `RUN_AT`, otherwise the previous weekday). It logs one line per fund: NAV found (code, date, nav), not published, or error. It exits non-zero if any fund errored, so a wrong SEC field mapping shows up here. Check the output and your Telegram chat. Fix any SEC or DeepSeek mismatch (see Prerequisites) before going on.
+   `-once` runs a single ingest, with no retry loop, for the NAV date the scheduler would fetch at the latest `RUN_AT` (with the default `04:00`: yesterday's NAV if it was a weekday, otherwise the previous Friday). It logs one line per fund: NAV found (code, date, nav), not published, or error. It exits non-zero if any fund errored, so a wrong SEC field mapping shows up here. Check the output and your Telegram chat. Fix any SEC or DeepSeek mismatch (see Prerequisites) before going on.
 
 5. The Pi has no battery clock, so on boot the time can be wrong until NTP syncs. The unit waits for `time-sync.target`; enable the wait service so that target means the clock is really synced:
 
