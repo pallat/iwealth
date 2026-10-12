@@ -49,3 +49,24 @@ func TestLoadErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateTaxFundNeedsIncome(t *testing.T) {
+	m := base()
+	m["ANNUAL_NET_INCOME"] = ""
+	c, err := Load(env(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Validate(); err == nil {
+		t.Fatal("tax fund without income must fail")
+	}
+	m["FUNDS"] = "XYZ:ordinary"
+	c, _ = Load(env(m))
+	if err := c.Validate(); err != nil {
+		t.Fatalf("ordinary-only needs no income: %v", err)
+	}
+	c, _ = Load(env(base()))
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}

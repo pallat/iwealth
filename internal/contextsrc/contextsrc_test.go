@@ -269,3 +269,13 @@ func TestBenchmarkZeroPrev(t *testing.T) {
 		t.Fatalf("%q %v", got, err)
 	}
 }
+
+func TestGatherWithReportsProviderErrors(t *testing.T) {
+	ps := []Provider{stub{"a", "x", nil}, stub{"c", "", errors.New("down")}}
+	var gotName string
+	var gotErr error
+	got := GatherWith(context.Background(), ps, func(name string, err error) { gotName, gotErr = name, err })
+	if got != "## a\nx" || gotName != "c" || gotErr == nil || gotErr.Error() != "down" {
+		t.Fatalf("got=%q name=%q err=%v", got, gotName, gotErr)
+	}
+}

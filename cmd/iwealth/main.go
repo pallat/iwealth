@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 	_ "time/tzdata"
@@ -43,6 +44,9 @@ func run(once bool) error {
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
 	if err := job.ValidateSchedule(cfg); err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
@@ -61,44 +65,52 @@ func run(once bool) error {
 		return fmt.Errorf("advisor: %w", err)
 	}
 	bot := telegram.New(cfg.TelegramToken, cfg.TelegramChatID)
+	bot.OnError = func(err error) { slog.Warn("telegram error", "err", err) }
 	providers := contextsrc.Build(cfg, st, nil)
 	j := &job.Job{
 		Cfg: cfg, Rules: rules, Store: st, SEC: sec.New(cfg.SECAPIKey),
 		Notify: bot, Advisor: adv,
-		Context: func(ctx context.Context) string { return contextsrc.Gather(ctx, providers) },
-		Now:     time.Now,
+		Context: func(ctx context.Context) string {
+			return contextsrc.GatherWith(ctx, providers, func(name string, err error) {
+				slog.Warn("context provider failed", "provider", name, "err", err)
+			})
+		},
+		Now: time.Now,
+		Log: slog.Default(),
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	if once {
-		today := job.Today(time.Now())
-		slog.Info("running once", "date", today.Format("2006-01-02"))
-		return j.RunDaily(ctx, today)
+		// One RunOnce, no retry loop and no weekend skip, for the latest weekday that
+		// should have data. Per-fund results are logged by the job.
+		date := job.OnceDate(time.Now(), cfg.RunAt)
+		slog.Info("running once", "date", date.Format("2006-01-02"))
+		missing, err := j.RunOnce(ctx, date)
+		if len(missing) > 0 {
+			slog.Warn("nav not published yet", "date", date.Format("2006-01-02"), "funds", missing)
+		}
+		if err != nil {
+			return fmt.Errorf("run once: %w", err)
+		}
+		slog.Info("run once finished", "date", date.Format("2006-01-02"), "missing", len(missing))
+		return nil
 	}
 
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		if err := bot.Poll(ctx, j.HandleCommand); err != nil && ctx.Err() == nil {
 			slog.Error("telegram poll stopped", "err", err)
 		}
 	}()
 
 	slog.Info("iwealth started", "funds", len(cfg.Funds), "run_at", cfg.RunAt, "retry_until", cfg.RetryUntil)
-	for {
-		next := job.NextRun(time.Now(), cfg.RunAt)
-		slog.Info("next run", "at", next.Format(time.RFC3339))
-		t := time.NewTimer(time.Until(next))
-		select {
-		case <-ctx.Done():
-			t.Stop()
-			slog.Info("shutting down")
-			return nil
-		case <-t.C:
-		}
-		date := job.Today(time.Now())
-		if err := j.RunDaily(ctx, date); err != nil && ctx.Err() == nil {
-			slog.Error("daily run failed", "date", date.Format("2006-01-02"), "err", err)
-		}
-	}
+	err = j.Loop(ctx)
+	slog.Info("shutting down")
+	stop()
+	wg.Wait() // the poller uses the store; join it before st.Close runs
+	return err
 }

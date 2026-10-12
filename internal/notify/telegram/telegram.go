@@ -26,8 +26,14 @@ type Bot struct {
 	BaseURL string
 	HTTP    *http.Client
 
-	idle    time.Duration // pause between successful polls (0 in production; long-poll already blocks)
-	backoff time.Duration // wait after a getUpdates error
+	// OnError, if set, receives getUpdates and reply errors (already token-free).
+	// Repeats of the same poll error are reported once, then at most once per
+	// errRepeat, so a long outage cannot flood the log.
+	OnError func(error)
+
+	now     func() time.Time // test hook; time.Now when nil
+	idle    time.Duration    // pause between successful polls (0 in production; long-poll already blocks)
+	backoff time.Duration    // wait after a getUpdates error
 }
 
 // New returns a Bot for the public Telegram API.
@@ -55,6 +61,22 @@ type update struct {
 		} `json:"chat"`
 		Text string `json:"text"`
 	} `json:"message"`
+}
+
+// errRepeat is how often an unchanged poll error is reported again.
+const errRepeat = time.Minute
+
+func (b *Bot) report(err error) {
+	if b.OnError != nil && err != nil {
+		b.OnError(err)
+	}
+}
+
+func (b *Bot) clock() time.Time {
+	if b.now != nil {
+		return b.now()
+	}
+	return time.Now()
 }
 
 func (b *Bot) client() *http.Client {
@@ -176,12 +198,21 @@ func safeHandle(ctx context.Context, h func(context.Context, string) string, tex
 // replying with the returned string when non-empty. It returns nil once ctx is done.
 func (b *Bot) Poll(ctx context.Context, handle func(ctx context.Context, text string) string) error {
 	var offset int64
+	var lastErr string
+	var lastAt time.Time
 	for ctx.Err() == nil {
 		ups, err := b.getUpdates(ctx, offset)
 		if err != nil {
+			if ctx.Err() == nil {
+				if msg := err.Error(); msg != lastErr || b.clock().Sub(lastAt) >= errRepeat {
+					lastErr, lastAt = msg, b.clock()
+					b.report(err)
+				}
+			}
 			sleep(ctx, b.backoff)
 			continue
 		}
+		lastErr = ""
 		for _, u := range ups {
 			if u.UpdateID >= offset {
 				offset = u.UpdateID + 1
@@ -190,7 +221,9 @@ func (b *Bot) Poll(ctx context.Context, handle func(ctx context.Context, text st
 				continue
 			}
 			if reply := safeHandle(ctx, handle, u.Message.Text); reply != "" {
-				_ = b.sendTo(ctx, b.ChatID, reply)
+				if err := b.sendTo(ctx, b.ChatID, reply); err != nil && ctx.Err() == nil {
+					b.report(err)
+				}
 			}
 		}
 		sleep(ctx, b.idle)

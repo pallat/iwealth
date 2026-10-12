@@ -133,3 +133,19 @@ func parseFunds(s string) ([]Fund, error) {
 	}
 	return out, nil
 }
+
+// Validate checks cross-field rules that Load does not enforce on its own: tax-deductible
+// funds need ANNUAL_NET_INCOME (net taxable income before fund deductions), otherwise
+// every tax estimate would silently be zero.
+func (c *Config) Validate() error {
+	if c.AnnualNetIncome > 0 {
+		return nil
+	}
+	for _, f := range c.Funds {
+		switch f.Type {
+		case RMF, SSF, ThaiESG:
+			return fmt.Errorf("ANNUAL_NET_INCOME is required (and must be greater than 0) because fund %s is a tax fund (%s)", f.Code, f.Type)
+		}
+	}
+	return nil
+}

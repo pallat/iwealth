@@ -292,14 +292,24 @@ func Build(cfg *config.Config, h Histories, hc *http.Client) []Provider {
 	return ps
 }
 
-// Gather joins non-empty provider sections; failing providers are skipped.
-func Gather(ctx context.Context, ps []Provider) string {
+// Gather joins non-empty provider sections; failing providers are skipped silently.
+func Gather(ctx context.Context, ps []Provider) string { return GatherWith(ctx, ps, nil) }
+
+// GatherWith is Gather that also reports each failing provider to onErr (may be nil).
+// Provider errors are already free of keys and tokens.
+func GatherWith(ctx context.Context, ps []Provider, onErr func(provider string, err error)) string {
 	var secs []string
 	for _, p := range ps {
 		cctx, cancel := context.WithTimeout(ctx, callTimeout)
 		out, err := p.Fetch(cctx)
 		cancel()
-		if err != nil || strings.TrimSpace(out) == "" {
+		if err != nil {
+			if onErr != nil {
+				onErr(p.Name(), err)
+			}
+			continue
+		}
+		if strings.TrimSpace(out) == "" {
 			continue
 		}
 		secs = append(secs, "## "+p.Name()+"\n"+out)
