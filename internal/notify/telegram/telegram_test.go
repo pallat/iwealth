@@ -175,10 +175,19 @@ func TestPollSurvivesPanicAndErrors(t *testing.T) {
 func TestPollReportsErrorsRateLimited(t *testing.T) {
 	var mu sync.Mutex
 	calls := 0
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		calls++
+		if calls == 4 {
+			clock = clock.Add(61 * time.Second) // the fourth identical failure comes a minute later
+		}
+		if calls >= 6 {
+			cancel()
+		}
 		if calls <= 4 {
 			w.Write([]byte(`{"ok":false,"description":"rate limited"}`))
 			return
@@ -186,35 +195,18 @@ func TestPollReportsErrorsRateLimited(t *testing.T) {
 		w.Write([]byte(`{"ok":true,"result":[]}`))
 	}))
 	defer srv.Close()
-	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	b := &Bot{Token: "SECRET", ChatID: 1, BaseURL: srv.URL, HTTP: srv.Client()}
 	b.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return clock }
 	b.backoff = time.Millisecond
 	b.idle = time.Millisecond
 	var errs []error
 	b.OnError = func(err error) { errs = append(errs, err) }
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() {
-		for {
-			mu.Lock()
-			c := calls
-			if c == 3 { // after three identical failures, 61s pass
-				clock = clock.Add(61 * time.Second)
-			}
-			mu.Unlock()
-			if c >= 6 {
-				cancel()
-				return
-			}
-			time.Sleep(time.Millisecond)
-		}
-	}()
 	if err := b.Poll(ctx, func(context.Context, string) string { return "" }); err != nil {
 		t.Fatal(err)
 	}
-	if len(errs) < 1 || len(errs) > 2 {
-		t.Fatalf("want first error plus at most one repeat after 60s, got %d: %v", len(errs), errs)
+	// 4 identical failures: reported at the first, silent for 2 and 3, reported again after 60s.
+	if len(errs) != 2 {
+		t.Fatalf("want 2 reports, got %d: %v", len(errs), errs)
 	}
 	for _, e := range errs {
 		if !strings.Contains(e.Error(), "rate limited") || strings.Contains(e.Error(), "SECRET") {
