@@ -386,10 +386,11 @@ func (j *Job) paid(ctx context.Context, text string) string {
 	if err != nil {
 		return fmt.Sprintf("บันทึก %s %s บาท แล้ว (อ่านยอดรวมไม่สำเร็จ)", fund.Code, amountStr(amount))
 	}
+	byType, _ := plan.SavedSoFar(j.Rules, j.Cfg.AnnualNetIncome, paid)
 	return fmt.Sprintf("บันทึก %s %s บาท แล้ว (บันทึกซ้ำจะนับเพิ่ม)\n%s ปี %d: ซื้อแล้ว %s | สิทธิ์คงเหลือ %s | ประหยัดภาษีโดยประมาณ %s บาท",
 		fund.Code, amountStr(amount), label(fund.Type), on.Year(),
 		money(paid[fund.Type]), money(j.Rules.RemainingRoom(fund.Type, paid)),
-		money(j.Rules.TaxSaved(j.Cfg.AnnualNetIncome, paid[fund.Type])))
+		money(byType[fund.Type]))
 }
 
 func (j *Job) taxSummary(ctx context.Context) string {
@@ -411,13 +412,12 @@ func (j *Job) taxSummary(ctx context.Context) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "สรุปสิทธิ์ลดหย่อนปี %d\n", year)
-	var total float64
+	byType, total := plan.SavedSoFar(j.Rules, j.Cfg.AnnualNetIncome, paid)
 	for _, t := range types {
-		total += paid[t]
 		fmt.Fprintf(&b, "%s: ซื้อแล้ว %s / เพดาน %s | คงเหลือ %s | ประหยัดภาษีโดยประมาณ %s บาท\n",
 			label(t), money(paid[t]), money(j.Rules.Caps[t]), money(j.Rules.RemainingRoom(t, paid)),
-			money(j.Rules.TaxSaved(j.Cfg.AnnualNetIncome, paid[t])))
+			money(byType[t]))
 	}
-	fmt.Fprintf(&b, "รวมประหยัดภาษีโดยประมาณ %s บาท", money(j.Rules.TaxSaved(j.Cfg.AnnualNetIncome, total)))
+	fmt.Fprintf(&b, "รวมประหยัดภาษีโดยประมาณ %s บาท (แยกตามลำดับ RMF, SSF, Thai ESG)", money(total))
 	return b.String()
 }

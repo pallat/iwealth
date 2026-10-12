@@ -415,3 +415,20 @@ func TestSchedule(t *testing.T) {
 		t.Errorf("next day: %v", got)
 	}
 }
+
+func TestTaxSavingsConsistentAcrossTypes(t *testing.T) {
+	e := setup(t, config.Fund{Code: "R", Type: config.RMF}, config.Fund{Code: "S", Type: config.SSF})
+	ctx := context.Background()
+	e.now = day(10, 12).Add(10 * time.Hour)
+	e.j.HandleCommand(ctx, "/paid R 300000")
+	r := e.j.HandleCommand(ctx, "/paid S 100000")
+	r1 := e.j.Rules
+	// SSF line is marginal after RMF: Tax(income-300k) - Tax(income-400k).
+	if want := money(r1.Tax(income-300000) - r1.Tax(income-400000)); !strings.Contains(r, want) {
+		t.Errorf("paid reply missing marginal ssf saving %s: %s", want, r)
+	}
+	total := money(r1.Tax(income) - r1.Tax(income-400000))
+	if tr := e.j.HandleCommand(ctx, "/tax"); !strings.Contains(tr, "รวมประหยัดภาษีโดยประมาณ "+total) {
+		t.Errorf("/tax total want %s: %s", total, tr)
+	}
+}
