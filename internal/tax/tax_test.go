@@ -13,7 +13,7 @@ func rules() *Rules {
 	return &Rules{
 		Brackets: []Bracket{{150000, 0}, {300000, 0.05}, {500000, 0.10}, {0, 0.20}},
 		Caps:     map[config.FundType]float64{config.RMF: 500000, config.SSF: 200000, config.ThaiESG: 300000},
-		Combined: Combined{Cap: 500000, Types: []config.FundType{config.RMF, config.SSF}},
+		Groups:   []Group{{Name: "retirement", Label: "r", Cap: 500000, Types: []config.FundType{config.RMF, config.SSF}}},
 	}
 }
 
@@ -75,7 +75,7 @@ func writeRules(t *testing.T, body string) string {
 
 func TestLoadRulesValidation(t *testing.T) {
 	const ok = "brackets:\n  - {up_to: 100, rate: 0}\n  - {up_to: 0, rate: 0.1}\n"
-	if _, err := LoadRules(writeRules(t, ok+"caps: {rmf: 5}\ncombined: {cap: 5, types: [rmf, ssf]}\n")); err != nil {
+	if _, err := LoadRules(writeRules(t, ok+"caps: {rmf: 5}\ngroups: [{name: g, cap: 5, types: [rmf, ssf]}]\n")); err != nil {
 		t.Fatalf("valid rules rejected: %v", err)
 	}
 	cases := map[string]struct{ body, want string }{
@@ -86,7 +86,7 @@ func TestLoadRulesValidation(t *testing.T) {
 		"rate negative":   {"brackets:\n  - {up_to: 0, rate: -0.1}\n", "rate"},
 		"unknown cap":     {ok + "caps: {foo: 1}\n", "foo"},
 		"upper cap":       {ok + "caps: {RMF: 1}\n", "RMF"},
-		"unknown comb":    {ok + "combined: {cap: 1, types: [bar]}\n", "bar"},
+		"unknown comb":    {ok + "groups: [{name: g, cap: 1, types: [bar]}]\n", "bar"},
 		"ordinary cap":    {ok + "caps: {ordinary: 1}\n", "ordinary"},
 		"manual reserved": {ok + "manual: [{key: rmf}]\n", "reserved"},
 		"manual upper":    {ok + "manual: [{key: PVD}]\n", "lower-case"},
@@ -113,7 +113,7 @@ func TestManualAndPctRoom(t *testing.T) {
 	r.Manual = []Manual{{Key: "pvd", Label: "PVD"}, {Key: "pension_ins", Label: "Pension"}}
 	r.Caps["pvd"] = 500000
 	r.Caps["pension_ins"] = 200000
-	r.Combined.Types = []config.FundType{config.RMF, config.SSF, "pvd", "pension_ins"}
+	r.Groups[0].Types = []config.FundType{config.RMF, config.SSF, "pvd", "pension_ins"}
 	r.Pct = map[config.FundType]float64{config.RMF: 0.3, "pension_ins": 0.15}
 
 	paid := map[config.FundType]float64{"pvd": 100000, config.RMF: 50000}
@@ -142,7 +142,7 @@ func TestDeductibleClampsToCaps(t *testing.T) {
 	r.Manual = []Manual{{Key: "pvd"}, {Key: "pension_ins"}}
 	r.Caps["pvd"] = 500000
 	r.Caps["pension_ins"] = 200000
-	r.Combined.Types = []config.FundType{config.RMF, config.SSF, "pvd", "pension_ins"}
+	r.Groups[0].Types = []config.FundType{config.RMF, config.SSF, "pvd", "pension_ins"}
 	r.Pct = map[config.FundType]float64{"pension_ins": 0.15}
 
 	// pension insurance 250k -> 200k item cap
@@ -161,11 +161,80 @@ func TestDeductibleClampsToCaps(t *testing.T) {
 	if d[config.RMF] != 400000 || d["pvd"] != 100000 || d["pension_ins"] != 0 {
 		t.Errorf("group allocation: %v", d)
 	}
-	if got := r.CombinedUsed(paid, 0); got != 500000 {
-		t.Errorf("CombinedUsed = %v", got)
+	if got := r.GroupUsed(r.Groups[0], paid, 0); got != 500000 {
+		t.Errorf("GroupUsed = %v", got)
 	}
 	// over-cap entry must not eat into group room beyond its cap
 	if got := r.RemainingRoom(config.RMF, map[config.FundType]float64{"pension_ins": 250000}, 0); got != 300000 {
 		t.Errorf("RMF room = %v want 300000", got)
+	}
+}
+
+func TestIncomeBaseExpenseAndPosition(t *testing.T) {
+	r := rules()
+	r.Expense = Expense{Pct: 0.5, Max: 100000}
+	r.Manual = []Manual{{Key: "personal", Auto: true}}
+	r.Caps["personal"] = 60000
+
+	cases := []struct {
+		name string
+		inc  Income
+		want float64
+	}{
+		{"salary capped", Income{Gross: 1000000}, 900000},
+		{"salary half", Income{Gross: 120000}, 60000},
+		{"none", Income{Gross: 1000000, Expense: "none"}, 1000000},
+		{"fixed", Income{Gross: 1000000, Expense: "fixed", ExpenseFixed: 30000}, 970000},
+		{"fixed never above gross", Income{Gross: 20000, Expense: "fixed", ExpenseFixed: 30000}, 0},
+		{"legacy adds auto back", Income{LegacyNet: 500000}, 560000},
+	}
+	for _, c := range cases {
+		if got := r.Base(c.inc); got != c.want {
+			t.Errorf("%s: Base = %v want %v", c.name, got, c.want)
+		}
+	}
+	// legacy: counting the auto item again lands back on the configured net
+	if got := r.NetTaxable(Income{LegacyNet: 500000}, nil); got != 500000 {
+		t.Errorf("legacy net = %v", got)
+	}
+	// gross mode deducts personal automatically
+	if got := r.NetTaxable(Income{Gross: 1000000}, nil); got != 840000 {
+		t.Errorf("gross net = %v", got)
+	}
+	if r.RemainingRoom("personal", nil, 0) != 0 {
+		t.Error("auto item has no room")
+	}
+
+	pos := r.BracketAt(300000) // top edge stays in the 5% bracket
+	if pos.Rate != 0.05 || pos.Lower != 150000 || pos.Upper != 300000 || pos.PrevRate != 0 || pos.NextRate != 0.10 {
+		t.Errorf("%+v", pos)
+	}
+	if pos := r.BracketAt(0); pos.Index != 0 || pos.Rate != 0 {
+		t.Errorf("%+v", pos)
+	}
+	if pos := r.BracketAt(9e9); pos.Upper != 0 || pos.Rate != 0.20 {
+		t.Errorf("%+v", pos)
+	}
+}
+
+func TestGroupsAndKindValidation(t *testing.T) {
+	const ok = "brackets:\n  - {up_to: 0, rate: 0.1}\n"
+	bad := map[string]struct{ body, want string }{
+		"item in two groups": {ok + "groups: [{name: a, cap: 1, types: [rmf]}, {name: b, cap: 1, types: [rmf]}]\n", "already in group"},
+		"dup group":          {ok + "groups: [{name: a, cap: 1, types: [rmf]}, {name: a, cap: 1, types: [ssf]}]\n", "unique"},
+		"zero group cap":     {ok + "groups: [{name: a, cap: 0, types: [rmf]}]\n", "cap"},
+		"bad kind":           {ok + "manual: [{key: x, kind: buy}]\n", "kind"},
+		"auto without cap":   {ok + "manual: [{key: x, auto: true}]\n", "auto"},
+		"bad expense":        {ok + "expense: {pct: 2, max: 1}\n", "expense"},
+	}
+	for name, c := range bad {
+		if _, err := LoadRules(writeRules(t, c.body)); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: err=%v want %q", name, err, c.want)
+		}
+	}
+	good := ok + "caps: {x: 5}\nmanual: [{key: x, kind: invest}]\ngroups: [{name: a, cap: 9, types: [rmf, x]}]\n"
+	r, err := LoadRules(writeRules(t, good))
+	if err != nil || !r.Invest("x") || !r.Invest(config.RMF) || r.GroupOf("x") == nil {
+		t.Fatalf("%v %+v", err, r)
 	}
 }

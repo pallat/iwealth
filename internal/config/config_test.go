@@ -114,3 +114,25 @@ func TestYearEndReminderFrom(t *testing.T) {
 		}
 	}
 }
+
+func TestExpenseDeductionSetting(t *testing.T) {
+	load := func(v string) (*Config, error) {
+		b := base()
+		b["EXPENSE_DEDUCTION"] = v
+		return Load(env(b))
+	}
+	if c, _ := load(""); c.ExpenseKind != "salary" {
+		t.Errorf("default %q", c.ExpenseKind)
+	}
+	if c, _ := load("none"); c.ExpenseKind != "none" {
+		t.Errorf("none %q", c.ExpenseKind)
+	}
+	if c, err := load("30000"); err != nil || c.ExpenseKind != "fixed" || c.ExpenseFixed != 30000 {
+		t.Errorf("fixed %+v %v", c, err)
+	}
+	for _, bad := range []string{"abc", "-5"} {
+		if _, err := load(bad); err == nil {
+			t.Errorf("%q should fail", bad)
+		}
+	}
+}

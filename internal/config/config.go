@@ -29,7 +29,9 @@ type Config struct {
 	PeakWindowDays                        int
 	DropTriggers                          []float64
 	AnnualNetIncome                       float64
-	AnnualGrossIncome                     float64 // optional; enables %-of-income deduction limits
+	AnnualGrossIncome                     float64 // gross yearly income; net income is derived from it
+	ExpenseKind                           string  // salary (default), none or fixed
+	ExpenseFixed                          float64
 	RunAt, RetryUntil                     string
 	YearEndMonth, YearEndDay              int // year-end reminder start (month 0 = off)
 	RetryInterval                         time.Duration
@@ -84,6 +86,16 @@ func Load(getenv func(string) string) (*Config, error) {
 	if v := getenv("ANNUAL_GROSS_INCOME"); v != "" {
 		if c.AnnualGrossIncome, err = strconv.ParseFloat(v, 64); err != nil || c.AnnualGrossIncome < 0 {
 			return nil, fmt.Errorf("ANNUAL_GROSS_INCOME must be a non-negative number")
+		}
+	}
+	c.ExpenseKind = "salary"
+	if v := strings.ToLower(strings.TrimSpace(getenv("EXPENSE_DEDUCTION"))); v != "" && v != "salary" {
+		if v == "none" {
+			c.ExpenseKind = "none"
+		} else if c.ExpenseFixed, err = strconv.ParseFloat(v, 64); err != nil || c.ExpenseFixed < 0 {
+			return nil, fmt.Errorf("EXPENSE_DEDUCTION must be salary, none or a non-negative amount")
+		} else {
+			c.ExpenseKind = "fixed"
 		}
 	}
 	if c.RetryInterval, err = time.ParseDuration(or(getenv("RETRY_INTERVAL"), "30m")); err != nil {
@@ -163,19 +175,19 @@ func parseFunds(s string) ([]Fund, error) {
 }
 
 // Validate checks cross-field rules that Load does not enforce on its own: tax-deductible
-// funds need ANNUAL_NET_INCOME (net taxable income before fund deductions), otherwise
+// funds need an income (ANNUAL_GROSS_INCOME, or the legacy ANNUAL_NET_INCOME), otherwise
 // every tax estimate would silently be zero.
 func (c *Config) Validate() error {
 	if c.AnnualGrossIncome > 0 && c.AnnualNetIncome > c.AnnualGrossIncome {
 		return fmt.Errorf("ANNUAL_NET_INCOME must not exceed ANNUAL_GROSS_INCOME")
 	}
-	if c.AnnualNetIncome > 0 {
+	if c.AnnualGrossIncome > 0 || c.AnnualNetIncome > 0 {
 		return nil
 	}
 	for _, f := range c.Funds {
 		switch f.Type {
 		case RMF, SSF, ThaiESG:
-			return fmt.Errorf("ANNUAL_NET_INCOME is required (and must be greater than 0) because fund %s is a tax fund (%s)", f.Code, f.Type)
+			return fmt.Errorf("ANNUAL_GROSS_INCOME is required (and must be greater than 0) because fund %s is a tax fund (%s)", f.Code, f.Type)
 		}
 	}
 	return nil

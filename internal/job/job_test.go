@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/pallat/iwealth/internal/config"
+	"github.com/pallat/iwealth/internal/plan"
 	"github.com/pallat/iwealth/internal/store"
 	"github.com/pallat/iwealth/internal/tax"
 )
@@ -85,8 +86,8 @@ func setup(t *testing.T, funds ...config.Fund) *env {
 		Year:     2026,
 		Brackets: []tax.Bracket{{UpTo: 150000, Rate: 0}, {UpTo: 1000000, Rate: 0.2}, {UpTo: 0, Rate: 0.35}},
 		Caps:     map[config.FundType]float64{config.RMF: 500000, config.SSF: 200000, config.ThaiESG: 300000},
-		Combined: tax.Combined{Cap: 500000, Types: []config.FundType{config.RMF, config.SSF, "pvd", "pension_ins"}},
-		Manual:   []tax.Manual{{Key: "pvd", Label: "PVD"}, {Key: "pension_ins", Label: "ประกันบำนาญ"}},
+		Groups:   []tax.Group{{Name: "retirement", Label: "เกษียณ", Cap: 500000, Types: []config.FundType{config.RMF, config.SSF, "pvd", "pension_ins"}}},
+		Manual:   []tax.Manual{{Key: "pvd", Label: "PVD"}, {Key: "pension_ins", Label: "ประกันบำนาญ", Kind: "invest"}},
 	}
 	rules.Caps["pvd"] = 500000
 	rules.Caps["pension_ins"] = 200000
@@ -993,7 +994,7 @@ func TestReportCommand(t *testing.T) {
 	e.st.AddPaid(ctx, "ABC-RMF", config.RMF, 9999, time.Date(2025, 6, 1, 0, 0, 0, 0, bangkok))
 
 	r := e.j.HandleCommand(ctx, "/report")
-	for _, w := range []string{"1. 2026-10-12 ABC-RMF 10,000", "2. 2026-10-12 ABC-RMF 5,000.50", "pvd", "60,000", "สรุปสิทธิ์ลดหย่อนปี 2026"} {
+	for _, w := range []string{"1. 2026-10-12 ABC-RMF 10,000", "2. 2026-10-12 ABC-RMF 5,000.50", "pvd", "60,000", "สรุปภาษีปี 2026"} {
 		if !strings.Contains(r, w) {
 			t.Errorf("report missing %q:\n%s", w, r)
 		}
@@ -1015,4 +1016,65 @@ func TestReportCommand(t *testing.T) {
 	if h := e.j.HandleCommand(ctx, "hello"); !strings.Contains(h, "/report") {
 		t.Errorf("help lacks /report: %s", h)
 	}
+}
+
+func TestTaxSummaryFromGrossIncome(t *testing.T) {
+	e := setup(t, config.Fund{Code: "ABC-RMF", Type: config.RMF})
+	ctx := context.Background()
+	e.now = day(10, 12).Add(10 * time.Hour)
+	// real-ish brackets and the shipped item set
+	e.j.Rules = loadShipped(t)
+	e.j.Cfg.AnnualGrossIncome, e.j.Cfg.AnnualNetIncome, e.j.Cfg.ExpenseKind = 1200000, 0, "salary"
+
+	e.j.HandleCommand(ctx, "/paid ABC-RMF 100000")
+	e.j.HandleCommand(ctx, "/deduct social_security 9000")
+	e.j.HandleCommand(ctx, "/deduct life_ins 100000")
+	e.j.HandleCommand(ctx, "/deduct health_ins 25000") // life+health group caps at 100k
+
+	r := e.j.HandleCommand(ctx, "/tax")
+	// expense 100k; deductions: personal 60k + rmf 100k + social 9k + life/health 100k = 269k
+	// net = 1,200,000 - 100,000 - 269,000 = 831,000 -> 20% bracket (750,001 - 1,000,000)
+	for _, w := range []string{
+		"รายได้รวม 1,200,000", "หักค่าใช้จ่าย 100,000", "ลดหย่อนที่นับได้ 269,000",
+		"เงินได้สุทธิ 831,000", "ขั้นภาษี 20%", "750,001 – 1,000,000",
+		"เงินได้สุทธิเกิน 1,000,000 จะขึ้นขั้น 25%", "ลดหย่อนเพิ่ม 81,000 จะลงเป็นขั้น 15%",
+		"ลดหย่อนส่วนตัว: 60,000 (หักอัตโนมัติ)", "RMF: ใช้แล้ว 100,000",
+		"ใช้สิทธิ์ได้อีก (ซื้อเพิ่มได้)", "ใช้สิทธิ์ได้อีก (ถ้าเข้าเกณฑ์)", "คู่สมรส: ได้อีก 60,000",
+	} {
+		if !strings.Contains(r, w) {
+			t.Errorf("/tax missing %q:\n%s", w, r)
+		}
+	}
+	// life+health group is full (125k recorded, 100k counted) -> not offered again
+	if strings.Contains(r, "ประกันชีวิต: ได้อีก") || strings.Contains(r, "ประกันสุขภาพ: ได้อีก") {
+		t.Errorf("full group must not be offered:\n%s", r)
+	}
+	if strings.Contains(r, "ANNUAL_GROSS_INCOME") {
+		t.Errorf("no legacy hint when gross is set:\n%s", r)
+	}
+	// personal allowance is automatic
+	if got := e.j.HandleCommand(ctx, "/deduct personal 60000"); !strings.Contains(got, "อัตโนมัติ") {
+		t.Errorf("personal must be rejected: %s", got)
+	}
+	if m, _ := e.st.Deductions(ctx, 2026); m["personal"] != 0 {
+		t.Errorf("personal recorded: %v", m)
+	}
+	// the dip plan uses the same derived net income
+	paid, _ := e.j.allPaid(ctx, 2026)
+	p, ok := plan.Build(e.j.Rules, e.j.income(), paid, config.RMF)
+	if !ok || p.Room != 260000 { // 30% of gross 360k - 100k bought
+		t.Fatalf("plan %+v %v", p, ok)
+	}
+	if want := e.j.Rules.TaxSaved(831000, 260000); p.TaxSaved != want {
+		t.Errorf("plan saving %v want %v", p.TaxSaved, want)
+	}
+}
+
+func loadShipped(t *testing.T) *tax.Rules {
+	t.Helper()
+	r, err := tax.LoadRules("../../tax_rules.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
 }

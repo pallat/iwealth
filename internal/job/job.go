@@ -282,6 +282,14 @@ func isTax(t config.FundType) bool {
 
 func label(t config.FundType) string { return strings.ToUpper(string(t)) }
 
+// income is the taxpayer's income as configured.
+func (j *Job) income() tax.Income {
+	return tax.Income{
+		Gross: j.Cfg.AnnualGrossIncome, LegacyNet: j.Cfg.AnnualNetIncome,
+		Expense: j.Cfg.ExpenseKind, ExpenseFixed: j.Cfg.ExpenseFixed,
+	}
+}
+
 // allPaid merges fund purchases (/paid) with manually reported totals (/deduct)
 // into one amount per deduction key.
 func (j *Job) allPaid(ctx context.Context, year int) (map[config.FundType]float64, error) {
@@ -493,7 +501,7 @@ func (j *Job) planLines(ctx context.Context, t config.FundType, year int) string
 	if err != nil {
 		return "แผนลดหย่อน: คำนวณไม่ได้ (อ่านยอดซื้อไม่สำเร็จ)"
 	}
-	p, ok := plan.Build(j.Rules, j.Cfg.AnnualNetIncome, j.Cfg.AnnualGrossIncome, paid, t)
+	p, ok := plan.Build(j.Rules, j.income(), paid, t)
 	if !ok {
 		return fmt.Sprintf("ลดหย่อน %s: สิทธิ์เต็มแล้วในปี %d", label(t), year)
 	}
@@ -614,7 +622,7 @@ func (j *Job) yearEndMessage(ctx context.Context, d time.Time) string {
 			continue
 		}
 		seen[f.Type] = true
-		if _, ok := plan.Build(j.Rules, j.Cfg.AnnualNetIncome, j.Cfg.AnnualGrossIncome, paid, f.Type); !ok {
+		if _, ok := plan.Build(j.Rules, j.income(), paid, f.Type); !ok {
 			continue
 		}
 		var codes []string
@@ -692,7 +700,7 @@ func (j *Job) paid(ctx context.Context, text string) string {
 	if err != nil {
 		return fmt.Sprintf("บันทึก %s %s บาท แล้ว (อ่านยอดรวมไม่สำเร็จ)", fund.Code, amountStr(amount))
 	}
-	byType, _ := plan.SavedSoFar(j.Rules, j.Cfg.AnnualNetIncome, j.Cfg.AnnualGrossIncome, paid)
+	byType, _ := plan.SavedSoFar(j.Rules, j.income(), paid)
 	return fmt.Sprintf("บันทึก %s %s บาท แล้ว (บันทึกซ้ำจะนับเพิ่ม)\n%s ปี %d: ซื้อแล้ว %s | สิทธิ์คงเหลือ %s | ประหยัดภาษีโดยประมาณ %s บาท",
 		fund.Code, amountStr(amount), label(fund.Type), on.Year(),
 		money(paid[fund.Type]), money(j.Rules.RemainingRoom(fund.Type, paid, j.Cfg.AnnualGrossIncome)),
@@ -714,6 +722,8 @@ func (j *Job) deduct(ctx context.Context, text string) string {
 		return fmt.Sprintf("%s ซื้อผ่านกองที่ติดตาม ใช้ /paid <กอง> <จำนวนเงิน> แทน", label(k))
 	case !j.Rules.IsManual(k):
 		return fmt.Sprintf("ไม่รู้จักรายการ %s ไม่ได้บันทึกอะไร\n%s", key, j.deductList(ctx, year))
+	case j.Rules.IsAuto(k):
+		return fmt.Sprintf("%s หักให้อัตโนมัติอยู่แล้ว ไม่ต้องบันทึก", j.Rules.Label(k))
 	}
 	if err := j.Store.SetDeduction(ctx, year, k, amount); err != nil {
 		return "บันทึกไม่สำเร็จ ลองใหม่อีกครั้ง"
@@ -730,18 +740,22 @@ func (j *Job) deduct(ctx context.Context, text string) string {
 	return head + "\n" + j.roomLines(paid, k)
 }
 
-// roomLines shows the used / cap / remaining line for t and, when t shares the
-// combined cap, the combined position.
+// roomLines shows the used / cap / remaining line for t and, when t is in a
+// group with a shared cap, the group position.
 func (j *Job) roomLines(paid map[config.FundType]float64, t config.FundType) string {
 	gross := j.Cfg.AnnualGrossIncome
 	out := fmt.Sprintf("%s: ใช้แล้ว %s / เพดาน %s | คงเหลือ %s%s", j.Rules.Label(t),
 		money(paid[t]), money(j.Rules.ItemCap(t, gross)), money(j.Rules.RemainingRoom(t, paid, gross)), j.overNote(paid, t))
-	if slices.Contains(j.Rules.Combined.Types, t) {
-		used := j.Rules.CombinedUsed(paid, gross)
-		out += fmt.Sprintf("\nกลุ่มเพดานรวม: ใช้แล้ว %s / %s | คงเหลือ %s",
-			money(used), money(j.Rules.Combined.Cap), money(max(j.Rules.Combined.Cap-used, 0)))
+	if g := j.Rules.GroupOf(t); g != nil {
+		out += "\n" + j.groupLine(*g, paid)
 	}
 	return out
+}
+
+func (j *Job) groupLine(g tax.Group, paid map[config.FundType]float64) string {
+	used := j.Rules.GroupUsed(g, paid, j.Cfg.AnnualGrossIncome)
+	return fmt.Sprintf("กลุ่ม%s (เพดานรวม): ใช้แล้ว %s / %s | คงเหลือ %s",
+		g.Label, money(used), money(g.Cap), money(max(g.Cap-used, 0)))
 }
 
 // overNote flags a recorded amount that exceeds what can be deducted. The amount
@@ -807,10 +821,18 @@ func (j *Job) deductList(ctx context.Context, year int) string {
 	if err != nil {
 		return "อ่านข้อมูลไม่สำเร็จ ลองใหม่อีกครั้ง"
 	}
+	gross := j.Cfg.AnnualGrossIncome
 	var b strings.Builder
 	fmt.Fprintf(&b, "รายการที่บันทึกเองได้ (ยอดสะสมปี %d):\n", year)
 	for _, m := range j.Rules.Manual {
-		fmt.Fprintf(&b, "%s (%s): %s บาท\n", m.Key, m.Label, money(manual[m.Key]))
+		if m.Auto {
+			continue
+		}
+		capTxt := "ไม่กำหนดเพดาน"
+		if c := j.Rules.ItemCap(m.Key, gross); c > 0 {
+			capTxt = "เพดาน " + money(c)
+		}
+		fmt.Fprintf(&b, "%s (%s): %s บาท | %s\n", m.Key, m.Label, money(manual[m.Key]), capTxt)
 	}
 	b.WriteString("ตัวอย่าง: /deduct pvd 60000 (ยอดสะสมทั้งปี ไม่ใช่ยอดที่เพิ่ม). RMF/SSF/Thai ESG ใช้ /paid")
 	return b.String()
@@ -820,43 +842,119 @@ func (j *Job) taxSummary(ctx context.Context) string {
 	return j.summaryFor(ctx, bkkDate(j.now()).Year())
 }
 
+func rate(r float64) string { return strings.TrimSuffix(fmt.Sprintf("%.1f", r*100), ".0") + "%" }
+
+// positionLines says where the net income sits in the brackets and what would move it.
+func (j *Job) positionLines(inc tax.Income, paid map[config.FundType]float64) string {
+	net := j.Rules.NetTaxable(inc, paid)
+	pos := j.Rules.BracketAt(net)
+	tx := j.Rules.Tax(net)
+	var b strings.Builder
+	if inc.Gross > 0 {
+		ded := j.Rules.Base(inc) - net
+		fmt.Fprintf(&b, "รายได้รวม %s | หักค่าใช้จ่าย %s | ลดหย่อนที่นับได้ %s\n",
+			money(inc.Gross), money(j.Rules.ExpenseDeduction(inc)), money(ded))
+	} else {
+		fmt.Fprintf(&b, "เงินได้ก่อนหักลดหย่อนที่ติดตาม %s (จาก ANNUAL_NET_INCOME)\n", money(j.Rules.Base(inc)))
+	}
+	span := "มากกว่า " + money(pos.Lower)
+	if pos.Upper > 0 {
+		span = money(pos.Lower+1) + " – " + money(pos.Upper)
+	}
+	fmt.Fprintf(&b, "เงินได้สุทธิ %s\nขั้นภาษี %s (%s) | ภาษีที่ต้องจ่าย %s บาท", money(net), rate(pos.Rate), span, money(tx))
+	if inc.Gross > 0 {
+		fmt.Fprintf(&b, " (%s ของรายได้รวม)", rate(tx/inc.Gross))
+	} else if base := j.Rules.Base(inc); base > 0 {
+		fmt.Fprintf(&b, " (%s ของเงินได้ก่อนหัก)", rate(tx/base))
+	}
+	b.WriteString("\n")
+	if pos.Upper > 0 {
+		fmt.Fprintf(&b, "เงินได้สุทธิเกิน %s จะขึ้นขั้น %s\n", money(pos.Upper), rate(pos.NextRate))
+	}
+	if pos.Index > 0 && net > pos.Lower {
+		fmt.Fprintf(&b, "ลดหย่อนเพิ่ม %s จะลงเป็นขั้น %s\n", money(net-pos.Lower), rate(pos.PrevRate))
+	}
+	return b.String()
+}
+
 func (j *Job) summaryFor(ctx context.Context, year int) string {
 	paid, err := j.allPaid(ctx, year)
 	if err != nil {
 		return "อ่านข้อมูลไม่สำเร็จ ลองใหม่อีกครั้ง"
 	}
-	seen := map[config.FundType]bool{}
-	var keys []config.FundType
+	inc := j.income()
+	gross := inc.Gross
+	ded := j.Rules.Deductible(paid, gross)
+	byType, total := plan.SavedSoFar(j.Rules, inc, paid)
+
+	tracked := map[config.FundType]bool{}
 	for _, f := range j.Cfg.Funds {
-		if isTax(f.Type) && !seen[f.Type] {
-			seen[f.Type] = true
-			keys = append(keys, f.Type)
+		if isTax(f.Type) {
+			tracked[f.Type] = true
 		}
 	}
-	for _, m := range j.Rules.Manual {
-		if paid[m.Key] > 0 {
-			keys = append(keys, m.Key)
-		}
-	}
-	if len(keys) == 0 {
-		return "ไม่มีกองลดหย่อนภาษีในรายการที่ติดตาม และยังไม่มียอดที่บันทึกเอง"
-	}
-	gross := j.Cfg.AnnualGrossIncome
 	var b strings.Builder
-	fmt.Fprintf(&b, "สรุปสิทธิ์ลดหย่อนปี %d\n", year)
-	byType, total := plan.SavedSoFar(j.Rules, j.Cfg.AnnualNetIncome, j.Cfg.AnnualGrossIncome, paid)
-	for _, t := range keys {
-		fmt.Fprintf(&b, "%s: ใช้แล้ว %s / เพดาน %s | คงเหลือ %s | ประหยัดภาษีโดยประมาณ %s บาท%s\n",
-			j.Rules.Label(t), money(paid[t]), money(j.Rules.ItemCap(t, gross)),
-			money(j.Rules.RemainingRoom(t, paid, gross)), money(byType[t]), j.overNote(paid, t))
+	fmt.Fprintf(&b, "สรุปภาษีปี %d\n", year)
+	b.WriteString(j.positionLines(inc, paid))
+
+	b.WriteString("\nใช้สิทธิ์ลดหย่อนแล้ว\n")
+	shown := 0
+	for _, t := range j.Rules.Deductions() {
+		if !tracked[t] && paid[t] == 0 && ded[t] == 0 {
+			continue
+		}
+		shown++
+		switch {
+		case j.Rules.IsAuto(t):
+			fmt.Fprintf(&b, "%s: %s (หักอัตโนมัติ) | ประหยัดภาษีโดยประมาณ %s บาท\n", j.Rules.Label(t), money(ded[t]), money(byType[t]))
+		case j.Rules.Caps[t] == 0:
+			fmt.Fprintf(&b, "%s: ใช้แล้ว %s (ไม่กำหนดเพดาน) | ประหยัดภาษีโดยประมาณ %s บาท\n", j.Rules.Label(t), money(paid[t]), money(byType[t]))
+		default:
+			fmt.Fprintf(&b, "%s: ใช้แล้ว %s / เพดาน %s | คงเหลือ %s | ประหยัดภาษีโดยประมาณ %s บาท%s\n",
+				j.Rules.Label(t), money(paid[t]), money(j.Rules.ItemCap(t, gross)),
+				money(j.Rules.RemainingRoom(t, paid, gross)), money(byType[t]), j.overNote(paid, t))
+		}
 	}
-	if used := j.Rules.CombinedUsed(paid, gross); len(j.Rules.Combined.Types) > 0 {
-		fmt.Fprintf(&b, "กลุ่มเพดานรวม: ใช้แล้ว %s / %s | คงเหลือ %s\n",
-			money(used), money(j.Rules.Combined.Cap), money(max(j.Rules.Combined.Cap-used, 0)))
+	if shown == 0 {
+		b.WriteString("ยังไม่มี\n")
+	}
+	for _, g := range j.Rules.Groups {
+		fmt.Fprintf(&b, "%s\n", j.groupLine(g, paid))
+	}
+	fmt.Fprintf(&b, "รวมประหยัดภาษีโดยประมาณ %s บาท\n", money(total))
+
+	var buy, other []plan.Opportunity
+	for _, o := range plan.Opportunities(j.Rules, inc, paid) {
+		if o.Invest {
+			buy = append(buy, o)
+		} else {
+			other = append(other, o)
+		}
+	}
+	oppLine := func(o plan.Opportunity) string {
+		note := ""
+		if g := j.Rules.GroupOf(o.Key); g != nil {
+			note = " (ใช้ร่วมกลุ่ม" + g.Label + ")"
+		}
+		return fmt.Sprintf("%s: ได้อีก %s → ประหยัดภาษีสูงสุด %s บาท%s\n", j.Rules.Label(o.Key), money(o.Room), money(o.TaxSaved), note)
+	}
+	if len(buy) > 0 {
+		b.WriteString("\nใช้สิทธิ์ได้อีก (ซื้อเพิ่มได้)\n")
+		for _, o := range buy {
+			b.WriteString(oppLine(o))
+		}
+	}
+	if len(other) > 0 {
+		b.WriteString("\nใช้สิทธิ์ได้อีก (ถ้าเข้าเกณฑ์)\n")
+		for _, o := range other {
+			b.WriteString(oppLine(o))
+		}
+	}
+	if len(buy)+len(other) > 0 {
+		b.WriteString("รายการในกลุ่มเดียวกันใช้เพดานร่วมกัน ภาษีที่ประหยัดของแต่ละบรรทัดรวมกันไม่ได้\n")
 	}
 	if gross <= 0 {
-		b.WriteString("หมายเหตุ: ยังไม่ได้ตั้ง ANNUAL_GROSS_INCOME จึงยังไม่คิดเพดาน % ของรายได้\n")
+		b.WriteString("หมายเหตุ: ยังไม่ได้ตั้ง ANNUAL_GROSS_INCOME จึงไม่คิดค่าใช้จ่ายและเพดาน % ของรายได้\n")
 	}
-	fmt.Fprintf(&b, "รวมประหยัดภาษีโดยประมาณ %s บาท", money(total))
-	return b.String()
+	return strings.TrimRight(b.String(), "\n")
 }

@@ -11,17 +11,33 @@ brackets:        # up_to: 0 means no upper limit
   - {up_to: 5000000, rate: 0.30}
   - {up_to: 0, rate: 0.35}
 
-# Baht cap per deduction. rmf/ssf/thaiesg are tracked funds (record with /paid);
-# keys listed under "manual" are recorded by hand with /deduct <key> <year-to-date total>.
+# Expense deduction for salary income (EXPENSE_DEDUCTION=salary, the default): pct of gross, at most max.
+expense: {pct: 0.5, max: 100000}
+
+# Baht cap per deduction key. A key with no cap here counts as recorded, with no limit.
+# rmf/ssf/thaiesg are tracked funds (record with /paid); every key under "manual" is recorded
+# by hand with /deduct <key> <year-to-date total>.
 caps:
   rmf: 500000
   ssf: 200000   # SSF deduction rules changed: purchases are deductible only for certain years; set to 0 if not applicable
   thaiesg: 300000
+  personal: 60000
+  spouse: 60000          # spouse with no income
+  parent_support: 120000 # 30,000 per parent aged 60+, up to 4 parents (yours and your spouse's)
+  pregnancy: 60000
   pvd: 500000          # provident fund (employee contribution)
   gpf: 500000          # government pension fund (กบข.)
   nsf: 500000          # national savings fund (กอช.)
   teacher_fund: 500000 # private teacher fund
   pension_ins: 200000  # pension life insurance
+  life_ins: 100000     # life/endowment insurance, 10+ years
+  health_ins: 25000    # own health insurance
+  parents_health: 15000
+  social_security: 9000
+  home_loan: 100000    # home loan interest
+  easy_ereceipt: 50000 # 2568 stimulus measure; edit or remove for other years
+  travel: 30000        # 2568 stimulus measure (Oct-Dec 2025)
+  new_home: 100000     # 2568 stimulus measure: new home construction
 
 # Optional limit as a fraction of GROSS annual income (0.3 = 30%). Needs ANNUAL_GROSS_INCOME in .env;
 # the lower of cap and pct x income applies. Without ANNUAL_GROSS_INCOME these are ignored.
@@ -32,14 +48,31 @@ pct:
   pvd: 0.15
   pension_ins: 0.15
 
-# Items that share one overall cap (thaiesg is NOT in it).
-combined:
-  cap: 500000
-  types: [rmf, ssf, pvd, gpf, nsf, teacher_fund, pension_ins]
+# Items that share one overall cap (thaiesg is NOT in the retirement group).
+groups:
+  - {name: retirement, label: "เกษียณ", cap: 500000, types: [rmf, ssf, pvd, gpf, nsf, teacher_fund, pension_ins]}
+  - {name: life_health, label: "ประกันชีวิต+สุขภาพ", cap: 100000, types: [life_ins, health_ins]}
 
+# kind: invest = you can still buy more of it; anything else depends on your circumstances.
+# auto: true = applied at its cap with no entry needed (personal allowance).
 manual:
+  - {key: personal, label: "ลดหย่อนส่วนตัว", auto: true}
+  - {key: spouse, label: "คู่สมรส"}
+  - {key: child, label: "บุตร (ยอดรวมที่ใช้สิทธิ์)"}
+  - {key: parent_support, label: "อุปการะบิดามารดา"}
+  - {key: disabled, label: "อุปการะผู้พิการ (ยอดรวม)"}
+  - {key: pregnancy, label: "ฝากครรภ์/คลอดบุตร"}
   - {key: pvd, label: "กองทุนสำรองเลี้ยงชีพ (PVD)"}
   - {key: gpf, label: "กบข."}
-  - {key: nsf, label: "กอช."}
+  - {key: nsf, label: "กอช.", kind: invest}
   - {key: teacher_fund, label: "กองทุนครูเอกชน"}
-  - {key: pension_ins, label: "ประกันชีวิตบำนาญ"}
+  - {key: pension_ins, label: "ประกันชีวิตบำนาญ", kind: invest}
+  - {key: life_ins, label: "ประกันชีวิต", kind: invest}
+  - {key: health_ins, label: "ประกันสุขภาพ", kind: invest}
+  - {key: parents_health, label: "ประกันสุขภาพบิดามารดา", kind: invest}
+  - {key: social_security, label: "ประกันสังคม"}
+  - {key: home_loan, label: "ดอกเบี้ยบ้าน"}
+  - {key: donation, label: "เงินบริจาค (ยอดที่นับได้)"}
+  - {key: easy_ereceipt, label: "Easy E-Receipt"}
+  - {key: travel, label: "ท่องเที่ยว"}
+  - {key: new_home, label: "สร้างบ้านใหม่"}
