@@ -27,7 +27,7 @@ import (
 )
 
 func main() {
-	once := flag.Bool("once", false, "run today's job immediately (Asia/Bangkok date), then exit")
+	once := flag.Bool("once", false, "run one ingest for the latest weekday (Asia/Bangkok), log per-fund results, then exit non-zero if any fund errored")
 	flag.Parse()
 	if err := run(*once); err != nil {
 		slog.Error("fatal", "err", err)

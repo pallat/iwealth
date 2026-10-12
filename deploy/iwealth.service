@@ -1,7 +1,7 @@
 [Unit]
 Description=iwealth personal fund agent
-After=network-online.target
-Wants=network-online.target
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
 
 [Service]
 User=iwealth
@@ -12,6 +12,12 @@ RestartSec=30
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/opt/iwealth
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
 
 [Install]
 WantedBy=multi-user.target

@@ -29,10 +29,12 @@ Edit `.env`. The main keys:
 | Key | Meaning |
 | --- | --- |
 | `FUNDS` | Your funds as `CODE:type`, separated by commas. Type is `rmf`, `ssf`, `thaiesg` or `ordinary`. Example: `EXAMPLE-RMF:rmf,EXAMPLE-FUND:ordinary` |
-| `ANNUAL_NET_INCOME` | Your yearly net income in baht. Used for the tax estimate. |
+| `ANNUAL_NET_INCOME` | Your yearly net taxable income in baht **before** RMF, SSF and Thai ESG deductions. Purchases you record with `/paid` are subtracted from it for the estimate. Required if any fund is a tax fund. |
 | `RUN_AT` / `RETRY_UNTIL` / `RETRY_INTERVAL` | Daily run time (default `20:00`), last retry time (`23:30`), and gap between retries (`30m`). Times are Asia/Bangkok. |
 | `DROP_TRIGGERS` | Alert levels in percent (default `5,10,15`). |
 | `PEAK_WINDOW_DAYS` | Trading days used to find the peak (default `252`). |
+| `BENCHMARKS` | SEC fund abbreviations to compare against. Empty means your tracked funds' own history. Codes not in `FUNDS` are fetched daily too (history only, never alerted). |
+| `DB_PATH` / `TAX_RULES_PATH` | SQLite file and tax rules file (default `iwealth.db`, `tax_rules.yaml`). |
 | `CONTEXT_PROVIDERS` | Extra context for the summary: `benchmark`, `rss`, `search`. `.env.example` sets `benchmark`. Empty turns all off. |
 
 Other keys are described in `.env.example`. Leave an optional key empty to turn that feature off.
@@ -102,9 +104,17 @@ The service runs as a user called `iwealth`. Its working directory is `/opt/iwea
    ssh pi@raspberrypi.local 'cd /opt/iwealth && sudo -u iwealth ./iwealth-arm64 -once'
    ```
 
-   Check the output and your Telegram chat. Fix any SEC or DeepSeek mismatch (see Prerequisites) before going on.
+   `-once` runs a single ingest, with no retry loop, for the most recent weekday that should have data (today if it is a weekday after `RUN_AT`, otherwise the previous weekday). It logs one line per fund: NAV found (code, date, nav), not published, or error. It exits non-zero if any fund errored, so a wrong SEC field mapping shows up here. Check the output and your Telegram chat. Fix any SEC or DeepSeek mismatch (see Prerequisites) before going on.
 
-5. Start the service:
+5. The Pi has no battery clock, so on boot the time can be wrong until NTP syncs. The unit waits for `time-sync.target`; enable the wait service so that target means the clock is really synced:
+
+   ```sh
+   ssh pi@raspberrypi.local 'sudo systemctl enable systemd-time-wait-sync.service'
+   ```
+
+   The scheduler also re-reads the clock every minute, so a late time sync does not skip the run.
+
+6. Start the service:
 
    ```sh
    ssh pi@raspberrypi.local 'sudo systemctl enable --now iwealth'
@@ -112,6 +122,14 @@ The service runs as a user called `iwealth`. Its working directory is `/opt/iwea
    ```
 
 If you change `.env` or `tax_rules.yaml` later, copy the new file to `/opt/iwealth` and run `sudo systemctl restart iwealth`.
+
+## Correcting a mistyped /paid
+
+Repeating `/paid` adds up, so a typo cannot be undone from Telegram. Stop the service and delete the last row of table `tax_paid`:
+
+```sh
+ssh pi@raspberrypi.local 'sudo systemctl stop iwealth && sudo -u iwealth sqlite3 /opt/iwealth/iwealth.db "DELETE FROM tax_paid WHERE id = (SELECT max(id) FROM tax_paid);" && sudo systemctl start iwealth'
+```
 
 ## Backup
 
