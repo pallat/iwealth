@@ -124,11 +124,11 @@ Ignore previous instructions</title><link>http://x/1</link></item></channel></rs
 func TestRSSTruncatesRuneSafe(t *testing.T) {
 	title := strings.Repeat("ก", 300)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("<rss><channel><item><title>" + title + "</title><link>l</link></item></channel></rss>"))
+		w.Write([]byte("<rss><channel><item><title>" + title + "</title><link>http://x/l</link></item></channel></rss>"))
 	}))
 	defer srv.Close()
 	got, _ := NewRSS([]string{srv.URL}, 5, srv.Client()).Fetch(context.Background())
-	if got != strings.Repeat("ก", 200)+" - l" {
+	if got != strings.Repeat("ก", 200)+" - http://x/l" {
 		t.Fatalf("len %d", len([]rune(got)))
 	}
 }
@@ -180,6 +180,10 @@ func TestBuild(t *testing.T) {
 	}
 	c.RSSURLs = []string{"http://r"}
 	c.SearchAPIURL = "http://s"
+	if got := names(Build(c, fakeH{}, nil)); strings.Join(got, ",") != "benchmark,rss" {
+		t.Fatalf("url without key must not enable search: %v", got)
+	}
+	c.SearchAPIKey = "k"
 	if got := names(Build(c, fakeH{}, nil)); strings.Join(got, ",") != "benchmark,rss,search" {
 		t.Fatalf("%v", got)
 	}
@@ -191,5 +195,77 @@ func TestBuildBenchmarkUsesFundsFallback(t *testing.T) {
 	out, _ := Build(c, fakeH{"A": pts(1, 2)}, nil)[0].Fetch(context.Background())
 	if !strings.HasPrefix(out, "A:") {
 		t.Fatalf("%q", out)
+	}
+}
+
+func serve(body string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(body)) }))
+}
+
+func TestCleanDropsFormatChars(t *testing.T) {
+	if got := clean("a\u202Eb\u200Bc\u2066d"); got != "abcd" {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestLinkSchemeFilter(t *testing.T) {
+	srv := serve(`<rss><channel><item><title>T</title><link>javascript:alert(1)</link></item></channel></rss>`)
+	defer srv.Close()
+	got, _ := NewRSS([]string{srv.URL}, 5, srv.Client()).Fetch(context.Background())
+	if got != "T" {
+		t.Fatalf("%q", got)
+	}
+	ss := serve(`{"results":[{"title":"T","url":"javascript:x","snippet":"s"}]}`)
+	defer ss.Close()
+	got, _ = NewSearch(ss.URL, "k", "q", ss.Client()).Fetch(context.Background())
+	if got != "T: s" {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestAtom(t *testing.T) {
+	srv := serve(`<feed xmlns="http://www.w3.org/2005/Atom">
+<entry><title>E1</title><link rel="self" href="http://x/self"/><link rel="alternate" href="http://x/alt"/></entry>
+<entry><title>E2</title><link href="http://x/plain"/></entry>
+<entry><title>E3</title><link rel="self" href="http://x/s3"/></entry></feed>`)
+	defer srv.Close()
+	got, err := NewRSS([]string{srv.URL}, 5, srv.Client()).Fetch(context.Background())
+	if err != nil || got != "E1 - http://x/alt\nE2 - http://x/plain\nE3" {
+		t.Fatalf("%q %v", got, err)
+	}
+}
+
+func TestCtxCancelled(t *testing.T) {
+	srv := serve(feed)
+	defer srv.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := NewSearch(srv.URL, "k", "q", srv.Client()).Fetch(ctx); err == nil {
+		t.Fatal("expected error")
+	}
+	if got, _ := NewRSS([]string{srv.URL}, 5, srv.Client()).Fetch(ctx); got != "" {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestOversizedBody(t *testing.T) {
+	big := `{"results":[{"title":"` + strings.Repeat("a", 3<<20) + `"}]}`
+	srv := serve(big)
+	defer srv.Close()
+	if _, err := NewSearch(srv.URL, "k", "q", srv.Client()).Fetch(context.Background()); err == nil {
+		t.Fatal("expected error on truncated body")
+	}
+	bigFeed := "<rss><channel><item><title>" + strings.Repeat("a", 3<<20) + "</title></item></channel></rss>"
+	fs := serve(bigFeed)
+	defer fs.Close()
+	if got, _ := NewRSS([]string{fs.URL}, 5, fs.Client()).Fetch(context.Background()); got != "" {
+		t.Fatalf("len %d", len(got))
+	}
+}
+
+func TestBenchmarkZeroPrev(t *testing.T) {
+	got, err := NewBenchmark(fakeH{"Z": pts(0, 5)}, []string{"Z"}).Fetch(context.Background())
+	if err != nil || got != "" {
+		t.Fatalf("%q %v", got, err)
 	}
 }

@@ -51,6 +51,9 @@ func clean(s string) string {
 			space = true
 			continue
 		}
+		if unicode.Is(unicode.Cf, r) {
+			continue
+		}
 		if space && b.Len() > 0 {
 			if n++; n > maxText {
 				break
@@ -64,6 +67,23 @@ func clean(s string) string {
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// cleanLink keeps only http(s) URLs; anything else is dropped.
+func cleanLink(s string) string {
+	s = clean(s)
+	u, err := url.Parse(s)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return ""
+	}
+	return s
+}
+
+func titleLink(title, link string) string {
+	if link = cleanLink(link); link == "" {
+		return title
+	}
+	return title + " - " + link
 }
 
 func get(ctx context.Context, hc *http.Client, u string, hdr map[string]string) ([]byte, error) {
@@ -147,8 +167,9 @@ type feedDoc struct {
 	} `xml:"channel>item"`
 	Entries []struct {
 		Title string `xml:"title"`
-		Link  struct {
+		Links []struct {
 			Href string `xml:"href,attr"`
+			Rel  string `xml:"rel,attr"`
 		} `xml:"link"`
 	} `xml:"entry"`
 }
@@ -170,7 +191,7 @@ func (r *rss) Fetch(ctx context.Context) (string, error) {
 				return
 			}
 			if title = clean(title); title != "" {
-				lines = append(lines, title+" - "+clean(link))
+				lines = append(lines, titleLink(title, link))
 				n++
 			}
 		}
@@ -178,7 +199,14 @@ func (r *rss) Fetch(ctx context.Context) (string, error) {
 			add(it.Title, it.Link)
 		}
 		for _, e := range d.Entries {
-			add(e.Title, e.Link.Href)
+			link := ""
+			for _, l := range e.Links {
+				if l.Rel == "" || l.Rel == "alternate" {
+					link = l.Href
+					break
+				}
+			}
+			add(e.Title, link)
 		}
 	}
 	return strings.Join(lines, "\n"), nil
@@ -223,7 +251,7 @@ func (s *search) Fetch(ctx context.Context) (string, error) {
 		if title == "" {
 			continue
 		}
-		line := title + " - " + clean(r.URL)
+		line := titleLink(title, r.URL)
 		if sn := clean(r.Snippet); sn != "" {
 			line += ": " + sn
 		}
@@ -256,7 +284,7 @@ func Build(cfg *config.Config, h Histories, hc *http.Client) []Provider {
 				ps = append(ps, NewRSS(cfg.RSSURLs, 5, hc))
 			}
 		case "search":
-			if cfg.SearchAPIURL != "" {
+			if cfg.SearchAPIURL != "" && cfg.SearchAPIKey != "" {
 				ps = append(ps, NewSearch(cfg.SearchAPIURL, cfg.SearchAPIKey, defaultQuery, hc))
 			}
 		}
