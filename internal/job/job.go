@@ -358,13 +358,16 @@ func (j *Job) RunOnce(ctx context.Context, date time.Time) (missing []string, er
 			errs = append(errs, ctx.Err())
 			break
 		}
+		before, _ := j.latestNAVDate(ctx, f.Code)
 		j.backfill(ctx, f.Code, older)
 		ok, e := j.ingest(ctx, f.Code, date)
 		if e != nil {
 			errs = append(errs, fmt.Errorf("fund %s: %w", f.Code, e))
 			continue
 		}
-		if !ok {
+		// Funds that publish late never have the target date; a newer NAV stored by
+		// backfill still counts as progress and is evaluated.
+		if after, _ := j.latestNAVDate(ctx, f.Code); !ok && !after.After(before) {
 			missing = append(missing, f.Code)
 			continue
 		}
@@ -380,6 +383,29 @@ func (j *Job) RunOnce(ctx context.Context, date time.Time) (missing []string, er
 		_, _ = j.ingest(ctx, code, date) // best-effort; ingest already logs the outcome
 	}
 	return missing, errors.Join(errs...)
+}
+
+// latestNAVDate is the date of the newest stored NAV of code; zero if none.
+func (j *Job) latestNAVDate(ctx context.Context, code string) (time.Time, error) {
+	hist, err := j.Store.History(ctx, code)
+	if err != nil || len(hist) == 0 {
+		return time.Time{}, err
+	}
+	return hist[len(hist)-1].Date, nil
+}
+
+// latestNote lists each fund's newest stored NAV date, e.g. "A 2026-10-09, B -".
+func (j *Job) latestNote(ctx context.Context, codes []string) string {
+	parts := make([]string, 0, len(codes))
+	for _, c := range codes {
+		d, _ := j.latestNAVDate(ctx, c)
+		s := "-"
+		if !d.IsZero() {
+			s = d.Format("2006-01-02")
+		}
+		parts = append(parts, c+" "+s)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // extraBenchmarks are BENCHMARKS codes that are not tracked funds.
@@ -541,11 +567,11 @@ func (j *Job) RunDaily(ctx context.Context, runDay time.Time) error {
 	var msg string
 	switch {
 	case err == nil && len(missing) == len(j.Cfg.Funds):
-		msg = "ยังไม่พบ NAV ของทุกกองสำหรับวันที่ " + date.Format("2006-01-02") + " (อาจเป็นวันหยุดตลาด)"
+		msg = "ยังไม่พบ NAV ของทุกกองสำหรับวันที่ " + date.Format("2006-01-02") + " (อาจเป็นวันหยุดตลาด) | NAV ล่าสุด: " + j.latestNote(ctx, missing)
 	default:
 		var parts []string
 		if len(missing) > 0 {
-			parts = append(parts, "ยังไม่พบ NAV ของ: "+strings.Join(missing, ", "))
+			parts = append(parts, "ยังไม่พบ NAV ของ: "+strings.Join(missing, ", ")+" (ล่าสุด: "+j.latestNote(ctx, missing)+")")
 		}
 		if err != nil {
 			parts = append(parts, "เกิดข้อผิดพลาดระหว่างประมวลผล (ดู log)")

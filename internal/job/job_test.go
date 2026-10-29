@@ -1187,3 +1187,38 @@ func TestGuideCommand(t *testing.T) {
 		t.Errorf("help: %s", h)
 	}
 }
+
+// Funds that publish NAV late (feeder funds) never have the run's target date; the
+// NAV that backfill stores must still be evaluated and must not count as missing.
+func TestLaggingFundEvaluatedFromBackfilledNAV(t *testing.T) {
+	e := setup(t)
+	e.seed(t, "ABC-RMF", day(10, 2), 100)
+	e.sec.set("ABC-RMF", day(10, 9), 80) // target day 10-12 stays unpublished
+	missing, err := e.j.RunOnce(context.Background(), day(10, 12))
+	if err != nil || len(missing) != 0 {
+		t.Fatalf("lagging fund reported missing: missing=%v err=%v", missing, err)
+	}
+	if len(e.n.msgs) != 1 || !strings.Contains(e.n.msgs[0], "ABC-RMF") || !strings.Contains(e.n.msgs[0], "20.0%") {
+		t.Fatalf("want one dip alert from the backfilled NAV, got %v", e.n.msgs)
+	}
+}
+
+func TestFundWithoutAnyNewNAVStillMissing(t *testing.T) {
+	e := setup(t)
+	e.seed(t, "ABC-RMF", day(10, 9), 100) // stored earlier, nothing new published
+	missing, err := e.j.RunOnce(context.Background(), day(10, 12))
+	if err != nil || len(missing) != 1 || missing[0] != "ABC-RMF" {
+		t.Fatalf("missing=%v err=%v", missing, err)
+	}
+}
+
+func TestRunDailyNoticeShowsLatestStoredNAVDate(t *testing.T) {
+	e := setup(t, config.Fund{Code: "A", Type: config.Ordinary}, config.Fund{Code: "B", Type: config.Ordinary})
+	e.seed(t, "A", day(10, 9), 10)
+	if err := e.j.RunDaily(context.Background(), day(10, 12)); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.n.msgs) != 1 || !strings.Contains(e.n.msgs[0], "A 2026-10-09") || !strings.Contains(e.n.msgs[0], "B -") {
+		t.Fatalf("notice should show each fund's latest stored NAV date, got %v", e.n.msgs)
+	}
+}
